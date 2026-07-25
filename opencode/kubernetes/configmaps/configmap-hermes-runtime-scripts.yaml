@@ -1,0 +1,245 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-runtime-scripts
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: devops-agent
+data:
+  init-workspace.sh: |
+    #!/bin/sh
+    set -eu
+    mkdir -p "$HERMES_WORKSPACE"
+    chown -R 10000:10000 "$HERMES_WORKSPACE"
+
+  # Pre-install OpenCode onto the PVC so the bridge sidecar comes up ready instead of
+  # npm-installing while Hermes is already probing its readiness endpoint.
+  init-opencode.sh: |
+    #!/bin/sh
+    set -eu
+    RELEASES="$OPENCODE_PREFIX/releases"
+    ACTIVE="$OPENCODE_PREFIX/current"
+    TMP="$RELEASES/opencode.$(date +%Y%m%d%H%M%S).$$"
+    mkdir -p "$RELEASES"
+    npm install -g --prefix "$TMP" "$OPENCODE_NPM_SPEC"
+    "$TMP/bin/opencode" --version
+    ln -sfn "$TMP" "$ACTIVE"
+    find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +4 | xargs -r rm -rf
+    echo "OpenCode active at $ACTIVE/bin/opencode:"
+    "$ACTIVE/bin/opencode" --version
+
+  # The REAL kubectl goes to $KUBECTL_REAL, which is not on PATH. The bridge sidecar's
+  # startup script installs the read-only wrapper at $KUBECTL_WRAPPER (which is on
+  # PATH) and that wrapper execs this binary only for allowlisted verbs.
+  init-kubectl.sh: |
+    #!/bin/sh
+    set -eu
+    KUBECTL_VERSION="$(curl -fsSL --retry 3 --retry-delay 2 "$KUBECTL_STABLE_URL")"
+    case "$KUBECTL_VERSION" in
+      v*) ;;
+      *) echo "Unexpected kubectl stable version: $KUBECTL_VERSION" >&2; exit 1 ;;
+    esac
+    mkdir -p "$(dirname "$KUBECTL_REAL")"
+    TMP="${KUBECTL_REAL}.tmp.$$"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$TMP" \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+    chmod 0755 "$TMP"
+    "$TMP" version --client=true 2>/dev/null | head -1
+    mv -f "$TMP" "$KUBECTL_REAL"
+    echo "kubectl $KUBECTL_VERSION installed at $KUBECTL_REAL (read-only wrapper is added by the bridge sidecar)"
+
+  init-hermes-config.sh: |
+    #!/bin/bash
+    set -eu
+    mkdir -p "$HERMES_HOME" "$HERMES_HOME/image_cache" "$HERMES_SKILLS_DIR"
+    chmod 0750 "$HERMES_HOME/image_cache"
+    chmod 0750 "$HERMES_SKILLS_DIR"
+
+    # Ship ONLY our declarative skill(s) plus Hermes' own self-improvement skills —
+    # never the full bundled catalog. The .no-bundled-skills marker makes the agent's
+    # sync_skills() a no-op so nothing auto-seeds; we then retain the self-improvement
+    # skills explicitly and purge everything else (including a catalog a previous image
+    # may have seeded onto this volume). Fewer skills = smaller prompt = faster.
+    touch "$HERMES_HOME/.no-bundled-skills"
+
+    SELF_IMPROVE_SKILLS="autonomous-ai-agents/hermes-agent software-development/hermes-agent-skill-authoring"
+    keep_names=""
+    for rel in $SELF_IMPROVE_SKILLS; do
+      src="/opt/hermes/skills/$rel"
+      name="$(basename "$rel")"
+      keep_names="$keep_names $name"
+      [ -d "$src" ] || continue
+      rm -rf "$HERMES_SKILLS_DIR/$name"
+      mkdir -p "$HERMES_SKILLS_DIR/$name"
+      cp -a "$src/." "$HERMES_SKILLS_DIR/$name/"
+    done
+
+    if [ -d /declarative-skills ]; then
+      for f in /declarative-skills/*.SKILL.md; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f" .SKILL.md)"
+        keep_names="$keep_names $name"
+        mkdir -p "$HERMES_SKILLS_DIR/$name"
+        cp "$f" "$HERMES_SKILLS_DIR/$name/SKILL.md"
+      done
+    fi
+
+    find "$HERMES_SKILLS_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | while IFS= read -r entry; do
+      base="$(basename "$entry")"
+      keepit=0
+      for k in $keep_names; do [ "$base" = "$k" ] && { keepit=1; break; }; done
+      [ "$keepit" -eq 1 ] || rm -rf "$entry"
+    done
+
+    export HERMES_HOME
+    /opt/hermes/.venv/bin/python - <<'PY'
+    from pathlib import Path
+    import os
+    import yaml
+
+    p = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    data = yaml.safe_load(p.read_text()) if p.exists() else {}
+    data = data or {}
+
+    provider_id = os.environ.get("HERMES_DEFAULT_PROVIDER", "opencode-bridge")
+    base_url = os.environ.get("HERMES_DEFAULT_BASE_URL", "http://127.0.0.1:18282/v1")
+    default_model = os.environ.get("HERMES_DEFAULT_MODEL", "opencode/mimo-v2.5-free")
+    api_mode = os.environ.get("HERMES_DEFAULT_API_MODE", "chat_completions")
+    context_length = int(os.environ.get("HERMES_DEFAULT_CONTEXT_LENGTH", "200000") or 200000)
+
+    # setdefault, not assignment: dashboard model changes survive a pod restart.
+    model_config = data.setdefault("model", {})
+    model_config.setdefault("default", default_model)
+    model_config.setdefault("provider", provider_id)
+    model_config.setdefault("base_url", base_url)
+    model_config.setdefault("api_mode", api_mode)
+    # Pinned deliberately (no setdefault): Hermes cannot probe a custom bridge's context
+    # window and defaults low, which makes compaction fire far too early.
+    model_config["context_length"] = context_length
+
+    # The models map fills the dashboard model picker. It is NOT hardcoded: the bridge
+    # writes every successful `opencode models --verbose` discovery to
+    # OPENCODE_BRIDGE_MODEL_CACHE on the PVC, and we rebuild the map from that file on
+    # each boot. So when opencode zen adds a free model it appears here after the next
+    # restart (and immediately in the bridge's own /v1/models), and a retired one drops
+    # out — no manifest edit. The literal below is only the first-boot seed, used when the
+    # cache does not exist yet because the bridge has never run on this volume.
+    import json
+
+    SEED_MODELS = {
+        "opencode/mimo-v2.5-free": 200000,
+        "opencode/big-pickle": 200000,
+        "opencode/deepseek-v4-flash-free": 200000,
+        "opencode/laguna-s-2.1-free": 256000,
+        "opencode/ling-3.0-flash-free": 262144,
+        "opencode/nemotron-3-ultra-free": 1000000,
+        "opencode/north-mini-code-free": 256000,
+    }
+
+    def load_discovered_models():
+        """(models_map, source) from the bridge's cache, else the first-boot seed."""
+        cache_path = os.environ.get("OPENCODE_BRIDGE_MODEL_CACHE", "").strip()
+        if cache_path and os.path.exists(cache_path):
+            try:
+                with open(cache_path, encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                entries = payload.get("models")
+                if isinstance(entries, dict) and entries:
+                    built = {}
+                    for model_id, info in entries.items():
+                        info = info if isinstance(info, dict) else {}
+                        entry = {}
+                        if info.get("context_length"):
+                            entry["context_length"] = int(info["context_length"])
+                        built[str(model_id)] = entry
+                    return built, f"cache({len(built)} models, discovered)"
+            except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+                print(f"warning: could not read {cache_path} ({exc}); using the seed list")
+        return ({m: {"context_length": ctx} for m, ctx in SEED_MODELS.items()},
+                "seed (bridge has not discovered yet on this volume)")
+
+    models_map, models_source = load_discovered_models()
+    # Keep the default model coherent with the catalogue we actually have.
+    if models_map and default_model not in models_map:
+        default_model = next(iter(models_map))
+        model_config["default"] = default_model
+        print(f"note: configured default model is absent from the {models_source} catalogue; "
+              f"using {default_model}")
+
+    providers = data.setdefault("providers", {})
+    providers[provider_id] = {
+        "name": "OpenCode Bridge (free)",
+        "base_url": base_url,
+        "api_key": os.environ["OPENCODE_BRIDGE_API_KEY"],
+        "default_model": default_model,
+        "transport": api_mode,
+        "models": models_map,
+    }
+
+    # Optional extra providers, managed so a removal from the env also removes them here.
+    previous_extra_provider_names = set(data.get("managed_extra_provider_names", []) or [])
+    loaded_provider_names = set()
+    extra_providers = os.environ.get("HERMES_EXTRA_PROVIDERS_YAML", "").strip()
+    if extra_providers:
+        loaded = yaml.safe_load(extra_providers) or {}
+        if not isinstance(loaded, dict):
+            raise TypeError("HERMES_EXTRA_PROVIDERS_YAML must be a mapping")
+        loaded_providers = loaded.get("providers", loaded)
+        if not isinstance(loaded_providers, dict):
+            raise TypeError("HERMES_EXTRA_PROVIDERS_YAML providers must be a mapping")
+        loaded_provider_names = set(loaded_providers)
+        for name in previous_extra_provider_names - loaded_provider_names:
+            providers.pop(name, None)
+        providers.update(loaded_providers)
+    else:
+        for name in previous_extra_provider_names:
+            providers.pop(name, None)
+    data["managed_extra_provider_names"] = sorted(loaded_provider_names)
+
+    # Hermes-side hardening. The OpenCode sidecar is where tool calls actually run, but
+    # Hermes has its own terminal/code-execution tools: disable arbitrary code execution
+    # and on-the-fly installs so the agent is limited to the binaries we bake in.
+    agent_cfg = data.setdefault("agent", {})
+    disabled = set(agent_cfg.get("disabled_toolsets") or [])
+    disabled.add("code_execution")
+    agent_cfg["disabled_toolsets"] = sorted(disabled)
+    agent_cfg["max_turns"] = int(os.environ.get("HERMES_MAX_TURNS", "60") or 60)
+    security_cfg = data.setdefault("security", {})
+    security_cfg["allow_lazy_installs"] = False
+
+    # Free models are text-only (no image input). Hermes' auxiliary Vision task
+    # defaults to provider "auto", which lands on the main model and therefore cannot
+    # process images. There is no "disable vision" switch, so route it explicitly when
+    # a vision-capable endpoint is available — set HERMES_VISION_BASE_URL (+ optional
+    # HERMES_VISION_MODEL / HERMES_VISION_API_KEY) and it is wired up here. Left unset,
+    # image requests simply fail on the free models; everything text keeps working.
+    vision_base_url = os.environ.get("HERMES_VISION_BASE_URL", "").strip()
+    if vision_base_url:
+        vision = data.setdefault("auxiliary", {}).setdefault("vision", {})
+        vision["base_url"] = vision_base_url
+        vision["provider"] = os.environ.get("HERMES_VISION_PROVIDER", "custom")
+        if os.environ.get("HERMES_VISION_MODEL", "").strip():
+            vision["model"] = os.environ["HERMES_VISION_MODEL"].strip()
+        if os.environ.get("HERMES_VISION_API_KEY", "").strip():
+            vision["api_key"] = os.environ["HERMES_VISION_API_KEY"].strip()
+
+    # Compaction at 85% of the window rather than the 50% default — the free models
+    # cost nothing per token, so use the context we have before summarizing.
+    data.setdefault("compression", {})["threshold"] = 0.85
+
+    tlg = data.setdefault("tool_loop_guardrails", {})
+    tlg["hard_stop_enabled"] = True
+
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+    print(f"hermes config seeded: provider={provider_id} model={default_model} "
+          f"base_url={base_url} models={len(models_map)} from {models_source}")
+    PY
+    chown -R 10000:10000 "$HERMES_HOME"
+
+  hermes-post-start.sh: |
+    #!/bin/sh
+    set -eu
+    # Expose the READ-ONLY wrapper (never $KUBECTL_REAL) to anything that bypasses PATH.
+    test -x "$KUBECTL_WRAPPER" && ln -sf "$KUBECTL_WRAPPER" /usr/local/bin/kubectl || true

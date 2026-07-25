@@ -1,0 +1,31 @@
+# Gate 1 (RBAC): grant the hermes-agent ServiceAccount write on Deployments so the
+# agent can fix them. This is ADDITIVE — it does not modify the base read-only
+# ClusterRole, so revoking is just `kubectl delete -f 02-grant-deploy-write.yaml`.
+# Narrow on purpose: deployments only, no secrets, no delete, no other resources.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hermes-demo-deploy-writer
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-demo
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hermes-demo-deploy-writer
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-demo
+subjects:
+  - kind: ServiceAccount
+    name: hermes-agent
+    namespace: devops-agent
+roleRef:
+  kind: ClusterRole
+  name: hermes-demo-deploy-writer
+  apiGroup: rbac.authorization.k8s.io

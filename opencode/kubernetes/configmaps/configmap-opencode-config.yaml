@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-opencode-config
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: opencode-permissions
+    app.kubernetes.io/part-of: devops-agent
+data:
+  # OpenCode's own config, loaded via OPENCODE_CONFIG=/etc/opencode/opencode.json.
+  # This is the model-facing half of the read-only posture. Verified semantics
+  # (opencode 1.18.x) that this file depends on:
+  #
+  #   * "deny" does not merely refuse a call — the tool is REMOVED from the model's
+  #     tool list, so a denied capability cannot be attempted at all. Confirmed: with
+  #     edit/write/patch denied the model reports "I don't have a write tool".
+  #   * "ask" + the bridge's --auto flag == ALLOW. --auto auto-approves anything not
+  #     explicitly denied, so never leave a capability on the implicit "ask" default
+  #     and expect it to be a guardrail. Every permission below is therefore explicit.
+  #   * A per-pattern map whose catch-all is "deny" (e.g. bash: {"kubectl get *":
+  #     "allow", "*": "deny"}) removes the bash tool wholesale — the allow patterns do
+  #     NOT survive. That is why bash is granted flatly here and constrained instead by
+  #     the kubectl wrapper + read-only RBAC, which are enforced outside the model.
+  #
+  # Layers that actually bound this agent (defense in depth):
+  #   1. this file            — no file mutation, no directory escape
+  #   2. kubectl wrapper      — mutating verbs rejected before they reach the API server
+  #   3. read-only RBAC       — the hard backstop: no writes, no secrets, no exec (rbac/)
+  #   4. container hardening  — non-root, no privilege escalation, NET_RAW/NET_ADMIN dropped
+  #
+  # `skills.paths` registers the PVC skill directory with OpenCode's own loader (it scans
+  # for **/SKILL.md under each path). Without it the agent's `skill` tool answered
+  # `Skill "lead-devops-sre" not found. Available skills: customize-opencode` — the model
+  # can see the skill named in `instructions` and tries to load it, so the name has to
+  # resolve. `instructions` keeps the brief always-on; the path makes the tool work too.
+  opencode.json: |
+    {
+      "$schema": "https://opencode.ai/config.json",
+      "permission": {
+        "read": "allow",
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "bash": "allow",
+        "task": "allow",
+        "todowrite": "allow",
+        "skill": "allow",
+        "webfetch": "allow",
+        "websearch": "allow",
+        "edit": "deny",
+        "write": "deny",
+        "patch": "deny",
+        "external_directory": "deny",
+        "doom_loop": "deny"
+      },
+      "autoupdate": false,
+      "share": "disabled",
+      "instructions": [
+        "/opt/data/skills/lead-devops-sre/SKILL.md"
+      ],
+      "skills": {
+        "paths": [
+          "/opt/data/skills"
+        ]
+      },
+      "logLevel": "INFO"
+    }

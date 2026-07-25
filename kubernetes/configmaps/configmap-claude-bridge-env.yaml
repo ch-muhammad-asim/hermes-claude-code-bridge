@@ -1,0 +1,139 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-claude-bridge-env
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: claude-bridge
+    app.kubernetes.io/part-of: devops-agent
+data:
+  # Container image knobs are consumed by Kustomize replacements at render time.
+  CLAUDE_BRIDGE_IMAGE: node:22-bookworm-slim
+  CLAUDE_BRIDGE_IMAGE_PULL_POLICY: IfNotPresent
+
+  # Runtime filesystem and Claude Code install paths.
+  HOME: /home/claude
+  CLAUDE_BIN: /opt/data/claude-code/current/bin/claude
+  CLAUDE_CODE_NPM_SPEC: "@anthropic-ai/claude-code@latest"
+  CLAUDE_CODE_PREFIX: /opt/data/claude-code
+  CLAUDE_CODE_UPDATE_INTERVAL_SECONDS: "86400"
+  # github-mcp-server is installed at pod start (and refreshed daily) by resolving the
+  # newest GitHub release at runtime and verifying it against the release's own
+  # checksums.txt. Pin GITHUB_MCP_VERSION to a tag (e.g. v1.4.0) to freeze the version.
+  GITHUB_MCP_REPO: github/github-mcp-server
+  GITHUB_MCP_VERSION: latest
+  GITHUB_MCP_BIN: /opt/data/github-mcp/current/github-mcp-server
+  GITHUB_APP_PRIVATE_KEY_FILE: /var/run/secrets/hermes-github-app/private-key.pem
+  PATH: /opt/data/claude-code/current/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+  # Production Google Cloud project used by read-only GCP MCP observability tools.
+  HERMES_GCP_PROJECT_ID: "your-gcp-project-id"
+  GOOGLE_CLOUD_PROJECT: "your-gcp-project-id"
+  GCLOUD_PROJECT: "your-gcp-project-id"
+  GCP_PROJECT_ID: "your-gcp-project-id"
+  # GCP MCP auth: set to "true" to enable the read-only GCP MCP via Workload Identity
+  # (recommended, keyless — bind the hermes-agent KSA to a read-only Google service
+  # account; see kubernetes/README.md "GCP MCP authentication"). Leave "false" if you
+  # instead use the OAuth-app fallback (seed GOOGLE_MCP_OAUTH_REFRESH_TOKEN).
+  GCP_MCP_WORKLOAD_IDENTITY: "false"
+
+  # Claude Code bridge settings.
+  CLAUDE_CODE_PROXY_HOST: "127.0.0.1"
+  CLAUDE_CODE_PROXY_PORT: "18181"
+  CLAUDE_CODE_PROXY_CWD: /workspace/devops-agent
+  # Cached attachments live on the shared PVC. This directory is
+  # exposed to Claude Code along with the approved PVC-backed Hermes skills path.
+  CLAUDE_CODE_ADDITIONAL_DIRS: /opt/data/image_cache,/opt/data/skills
+  # Durable agent memory lives on the PVC-backed Claude home. Keep this as the
+  # approved compact memory path; all operational tools remain read-only.
+  CLAUDE_CODE_MEMORY_DIR: /home/claude/.claude/projects/-workspace-devops-agent/memory
+  # Hermes dashboard skills live on the shared PVC. This is the only approved
+  # writable skill path; it is for SKILL.md content only, not operational scripts.
+  HERMES_SKILLS_DIR: /opt/data/skills
+  CLAUDE_CODE_PROXY_MODEL: claude-opus-4-8
+  # Models advertised on /v1/models (the dashboard model picker). Not a whitelist:
+  # with CLAUDE_CODE_PASS_MODEL=true, any valid Claude model ID a client requests is honored.
+  CLAUDE_CODE_MODELS: "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5"
+  CLAUDE_CODE_EFFORT: medium
+  CLAUDE_CODE_PERMISSION_MODE: dontAsk
+  CLAUDE_CODE_MAX_BUDGET_USD: "3.00"
+  CLAUDE_CODE_PASS_MODEL: "true"
+
+  # Enhanced proxy capabilities (claude_code_bridge.py). Defaults are sensible; these
+  # make them explicit and tunable. Effort stays medium (above) for cost control.
+  CLAUDE_CODE_STREAM_OUTPUT: "1"            # token-level SSE streaming
+  CLAUDE_CODE_SESSION_PERSISTENCE: "1"      # resume Claude Code sessions across turns -> cache_read reuse (cost)
+  CLAUDE_CODE_SESSION_STORE: /opt/data/proxy-sessions.json
+  CLAUDE_CODE_MAX_CONCURRENCY: "4"          # max simultaneous claude subprocesses (sidecar memory bound)
+  CLAUDE_CODE_QUEUE_TIMEOUT: "30"           # seconds to wait for a concurrency slot before 503
+  CLAUDE_CODE_IDLE_TIMEOUT: "180"           # kill a run idle this many seconds (0 disables)
+  CLAUDE_CODE_TIMEOUT: "600"                # total per-request timeout
+  CLAUDE_CODE_MAX_RETRIES: "1"              # retry-before-first-byte on transient failure
+
+  # Read-only tool policy. Keep this in sync with configmap-claude-permissions.yaml.
+  # kubectl access is intentionally scoped to read-only verbs only; the cluster-wide
+  # read-only RBAC (hermes-service-account/) is the hard backstop — no secrets, no
+  # writes, no exec/port-forward are possible even if this list is widened.
+  CLAUDE_CODE_ALLOWED_TOOLS: >-
+    Read(//opt/data/image_cache/**),
+    Read(//opt/data/skills/**),
+    Write(//opt/data/skills/**),
+    Read(//home/claude/.claude/projects/-workspace-devops-agent/memory/**),
+    Write(//home/claude/.claude/projects/-workspace-devops-agent/memory/**),
+    mcp__github-sre-readonly__*,
+    mcp__gcp-logging-sre-readonly__list_log_entries,
+    mcp__gcp-logging-sre-readonly__list_log_names,
+    mcp__gcp-logging-sre-readonly__get_bucket,
+    mcp__gcp-logging-sre-readonly__list_buckets,
+    mcp__gcp-logging-sre-readonly__get_view,
+    mcp__gcp-logging-sre-readonly__list_views,
+    mcp__gcp-monitoring-sre-readonly__list_timeseries,
+    mcp__gcp-monitoring-sre-readonly__query_range,
+    mcp__gcp-monitoring-sre-readonly__get_alert_policy,
+    mcp__gcp-monitoring-sre-readonly__list_alert_policies,
+    mcp__gcp-monitoring-sre-readonly__get_alert,
+    mcp__gcp-monitoring-sre-readonly__list_alerts,
+    mcp__gcp-monitoring-sre-readonly__list_metric_descriptors,
+    mcp__gcp-monitoring-sre-readonly__list_dashboards,
+    mcp__gcp-monitoring-sre-readonly__get_dashboard,
+    mcp__gcp-trace-sre-readonly__list_traces,
+    mcp__gcp-trace-sre-readonly__get_trace,
+    Bash(kubectl get:*),
+    Bash(kubectl describe:*),
+    Bash(kubectl logs:*),
+    Bash(kubectl top:*),
+    Bash(kubectl events:*),
+    Bash(kubectl explain:*),
+    Bash(kubectl api-resources:*),
+    Bash(kubectl api-versions:*),
+    Bash(kubectl version:*)
+  CLAUDE_CODE_DISALLOWED_TOOLS: >-
+    Edit,
+    NotebookEdit,
+    Bash(kubectl delete:*),
+    Bash(kubectl create:*),
+    Bash(kubectl apply:*),
+    Bash(kubectl edit:*),
+    Bash(kubectl patch:*),
+    Bash(kubectl replace:*),
+    Bash(kubectl scale:*),
+    Bash(kubectl rollout:*),
+    Bash(kubectl set:*),
+    Bash(kubectl annotate:*),
+    Bash(kubectl label:*),
+    Bash(kubectl cordon:*),
+    Bash(kubectl uncordon:*),
+    Bash(kubectl drain:*),
+    Bash(kubectl taint:*),
+    Bash(kubectl exec:*),
+    Bash(kubectl attach:*),
+    Bash(kubectl cp:*),
+    Bash(kubectl port-forward:*),
+    Bash(kubectl proxy:*),
+    Bash(kubectl run:*),
+    Bash(kubectl debug:*),
+    Bash(kubectl get secret:*),
+    Bash(kubectl get secrets:*),
+    Bash(kubectl describe secret:*),
+    Bash(kubectl describe secrets:*)

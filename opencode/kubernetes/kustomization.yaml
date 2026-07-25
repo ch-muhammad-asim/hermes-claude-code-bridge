@@ -1,0 +1,141 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# ☸️ Self-contained Kustomize root for Hermes + the OpenCode bridge (free models).
+# Render:  kubectl kustomize .
+# Apply:   kubectl apply -k .
+#
+# Secrets are NOT part of this root on purpose — render secrets/secret.template.yaml
+# with envsubst and apply it separately so real values never live in Git.
+resources:
+  - configmaps/configmap-opencode-bridge-startup.yaml
+  - configmaps/configmap-opencode-bridge-env.yaml
+  - configmaps/configmap-opencode-config.yaml
+  - configmaps/configmap-hermes-runtime-scripts.yaml
+  - configmaps/configmap-hermes-runtime-env.yaml
+  - rbac/01-serviceaccount.yaml
+  - rbac/02-role.yaml
+  - rbac/03-rolebinding.yaml
+  - rbac/04-clusterrole-readonly.yaml
+  - workloads/service.yaml
+  - workloads/statefulset.yaml
+  - workloads/ingressroute.yaml
+
+configMapGenerator:
+  # The bridge itself — one copy, mounted read-only into the sidecar. Identical file to
+  # ../hermes-desktop/opencode_bridge.py, so a fix lands in both by copying it across.
+  - name: hermes-agent-opencode-bridge
+    namespace: devops-agent
+    files:
+      - opencode_bridge.py=bridge/opencode_bridge.py
+  - name: hermes-agent-declarative-skills
+    namespace: devops-agent
+    files:
+      - lead-devops-sre.SKILL.md=skills/lead-devops-sre/SKILL.md
+  # ── Single source of truth for per-deployment values ──────────────────────
+  # Set these ONCE here; the replacements below fan them out to every manifest field
+  # that needs them, so `kubectl apply -k .` renders the whole stack.
+  - name: hermes-params
+    namespace: devops-agent
+    literals:
+      - HERMES_DOMAIN=hermes.saqlainmushtaq.com
+
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: opencode-bridge
+    app.kubernetes.io/part-of: devops-agent
+
+replacements:
+  # ── Images: declared once in the env ConfigMaps, injected into the pod spec ──
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-runtime-env
+      fieldPath: data.INIT_WORKSPACE_IMAGE
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=init-workspace].image
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-runtime-env
+      fieldPath: data.OPENCODE_INSTALLER_IMAGE
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=init-opencode].image
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-runtime-env
+      fieldPath: data.KUBECTL_INSTALLER_IMAGE
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=init-kubectl].image
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-runtime-env
+      fieldPath: data.HERMES_IMAGE
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.initContainers.[name=init-hermes-config].image
+          - spec.template.spec.containers.[name=hermes].image
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-opencode-bridge-env
+      fieldPath: data.OPENCODE_BRIDGE_IMAGE
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.containers.[name=opencode-bridge].image
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-opencode-bridge-env
+      fieldPath: data.OPENCODE_BRIDGE_IMAGE_PULL_POLICY
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.containers.[name=opencode-bridge].imagePullPolicy
+  # ── Bridge port: one value drives the container port and Hermes' base_url ──
+  - source:
+      kind: ConfigMap
+      name: hermes-agent-opencode-bridge-env
+      fieldPath: data.OPENCODE_BRIDGE_PORT
+    targets:
+      - select:
+          kind: StatefulSet
+          name: hermes-agent
+        fieldPaths:
+          - spec.template.spec.containers.[name=opencode-bridge].ports.[name=bridge].containerPort
+        options:
+          # containerPort is an int; the ConfigMap value is a string.
+          create: false
+  # ── Domain: set once in hermes-params, fan out to every Traefik Host() route ──
+  - source:
+      kind: ConfigMap
+      name: hermes-params
+      fieldPath: data.HERMES_DOMAIN
+    targets:
+      - select:
+          kind: IngressRoute
+          name: hermes-agent-dashboard
+        fieldPaths:
+          - spec.routes.0.match
+          - spec.routes.1.match
+          - spec.routes.2.match
+        options:
+          delimiter: "`"
+          index: 1

@@ -1,0 +1,37 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hermes-agent-dashboard
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: devops-agent
+spec:
+  # Served by the Traefik controller that watches the "traefik-external" IngressClass
+  # (chart-pinned install under the repo's kubernetes/traefik/). An ingress.class
+  # annotation naming a class no Traefik instance watches is silently never picked
+  # up — declare the class in spec and keep it aligned with your Traefik install.
+  ingressClassName: traefik-external
+  entryPoints:
+    - websecure
+  tls: {}
+  routes:
+    - match: Host(`devops.saqlainmushtaq.com`) && PathPrefix(`/v1`)
+      kind: Rule
+      services:
+        - name: hermes-agent
+          namespace: devops-agent
+          port: 8642
+    - match: Host(`devops.saqlainmushtaq.com`) && PathPrefix(`/health`)
+      kind: Rule
+      services:
+        - name: hermes-agent
+          namespace: devops-agent
+          port: 8642
+    - match: Host(`devops.saqlainmushtaq.com`) && PathPrefix(`/`)
+      kind: Rule
+      services:
+        - name: hermes-agent
+          namespace: devops-agent
+          port: 9119

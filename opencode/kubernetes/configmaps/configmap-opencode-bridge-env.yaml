@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-opencode-bridge-env
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: opencode-bridge
+    app.kubernetes.io/part-of: devops-agent
+data:
+  # Container image knobs are consumed by Kustomize replacements at render time.
+  # node:*-slim carries npm (to install OpenCode) and the startup script adds python3
+  # (for the stdlib-only bridge) — same shape as the Claude Code deployment.
+  OPENCODE_BRIDGE_IMAGE: node:22-bookworm-slim
+  OPENCODE_BRIDGE_IMAGE_PULL_POLICY: IfNotPresent
+
+  # Runtime filesystem and OpenCode install paths. HOME sits on the shared PVC so
+  # OpenCode's credential store (~/.local/share/opencode/auth.json), config and any
+  # session state survive restarts.
+  HOME: /home/opencode
+  OPENCODE_BIN: /opt/data/opencode/current/bin/opencode
+  OPENCODE_NPM_SPEC: "opencode-ai@latest"
+  OPENCODE_PREFIX: /opt/data/opencode
+  OPENCODE_UPDATE_INTERVAL_SECONDS: "86400"
+  PATH: /opt/data/opencode/current/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+  # Bridge listener. Pod containers share a network namespace, so Hermes reaches the
+  # sidecar on loopback. Port 18282 mirrors the desktop bridge (18181/18182 belong to
+  # the Claude Code bridges, so both stacks can coexist in one pod if you ever want that).
+  OPENCODE_BRIDGE_HOST: "127.0.0.1"
+  OPENCODE_BRIDGE_PORT: "18282"
+  OPENCODE_BRIDGE_CWD: /workspace/devops-agent
+
+  # Model policy. FREE_ONLY=true makes the bridge discover its catalogue from
+  # `opencode models --verbose` and serve ONLY models whose input and output cost are
+  # 0 — a mis-typed model in the dashboard can't start spending. Set to "false" (and
+  # seed credentials) if you deliberately want paid providers in-cluster.
+  OPENCODE_BRIDGE_MODEL: opencode/mimo-v2.5-free
+  OPENCODE_BRIDGE_MODEL_PROVIDERS: opencode
+  OPENCODE_BRIDGE_FREE_ONLY: "true"
+  # Leave empty to auto-discover. Pin a comma-separated list to freeze the catalogue
+  # the dashboard model picker offers (the default model is always included) — but note
+  # that pinning opts OUT of tracking the free tier, so a retired model stays advertised.
+  OPENCODE_BRIDGE_MODELS: ""
+  # Keeping up with a moving free tier. The catalogue is re-discovered from
+  # `opencode models --verbose --refresh` on this interval, so models opencode zen adds
+  # appear and retired ones drop out WITHOUT a restart or a manifest edit. Force one
+  # immediately with: POST /v1/models/refresh.
+  OPENCODE_BRIDGE_MODEL_REFRESH_INTERVAL: "3600"
+  # Every successful discovery is persisted here. It is what the bridge falls back to
+  # when discovery fails (better than a list frozen in code), and init-hermes-config
+  # reads it to build the dashboard's model picker — so nothing about the catalogue is
+  # hardcoded in the manifests. Lives on the PVC, so it survives restarts.
+  OPENCODE_BRIDGE_MODEL_CACHE: /opt/data/opencode-models.json
+  # OpenCode agent to run per request ("build" is the default primary agent) and the
+  # provider-specific reasoning variant (empty = provider default).
+  OPENCODE_BRIDGE_AGENT: build
+  OPENCODE_BRIDGE_VARIANT: ""
+
+  # Concurrency and timeouts. Free tiers rate-limit aggressively, so keep concurrency
+  # low: a burst returns a fast 429 instead of queueing behind the upstream limiter.
+  OPENCODE_BRIDGE_MAX_CONCURRENCY: "2"
+  OPENCODE_BRIDGE_QUEUE_WAIT: "30"
+  OPENCODE_BRIDGE_TIMEOUT: "600"
+  OPENCODE_BRIDGE_MAX_PROMPT_CHARS: "200000"
+
+  # Response shaping. Tool notes make the agent's kubectl/read steps visible in the
+  # dashboard transcript; reasoning blocks are off by default (noisy + token cost).
+  OPENCODE_BRIDGE_SHOW_TOOLS: "1"
+  OPENCODE_BRIDGE_SHOW_REASONING: "0"
+
+  # OpenCode persists a session per run. The bridge deletes the ones it creates so the
+  # PVC doesn't grow without bound; set to "0" to keep them for forensics.
+  OPENCODE_BRIDGE_DELETE_SESSIONS: "1"
+
+  # Permission policy (configmap-opencode-config.yaml), passed by ABSOLUTE PATH.
+  # OPENCODE_CONFIG is the reliable way to load it: a project-level ./opencode.json is
+  # only picked up when the cwd resolves to a real project root, which a bare mounted
+  # workspace does not always satisfy. Verify in-pod with `opencode debug config`.
+  # This is the FIRST layer of the read-only posture; the RBAC in rbac/ is the backstop.
+  OPENCODE_CONFIG: /etc/opencode/opencode.json
+
+  # Read-only kubectl. The real binary is installed by the init container at
+  # KUBECTL_REAL; a wrapper that rejects mutating verbs is installed earlier on PATH
+  # as /opt/data/bin/kubectl, so `kubectl delete ...` fails fast with a clear message
+  # instead of relying on an API-server 403 alone.
+  KUBECTL_REAL: /opt/data/kubectl/kubectl
+  KUBECTL_WRAPPER: /opt/data/bin/kubectl
+  # Gate 2 of the demo overlay. EMPTY = read-only, which is the only posture this base
+  # deployment ships. Space-separated verbs added here are accepted by the kubectl
+  # wrapper on top of the read-only allowlist; ../../../opencode-demo sets it to
+  # "patch set rollout" for a temporary diagnose-and-fix demo, and reverting the base
+  # closes it again. RBAC remains the hard backstop either way.
+  KUBECTL_EXTRA_WRITE_VERBS: ""

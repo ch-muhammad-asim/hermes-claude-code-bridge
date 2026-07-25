@@ -1,0 +1,238 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-opencode-bridge-startup
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: opencode-bridge
+    app.kubernetes.io/part-of: devops-agent
+data:
+  start-opencode-bridge.sh: |
+    #!/bin/sh
+    set -eu
+
+    # The image is node:*-slim (npm for OpenCode); add python3 for the stdlib-only
+    # bridge plus the usual curl/ca-certificates for release downloads.
+    apt-get update
+    apt-get install -y --no-install-recommends python3 curl ca-certificates
+    rm -rf /var/lib/apt/lists/*
+
+    # ── OpenCode CLI ────────────────────────────────────────────────────────────
+    # Versioned installs on the shared PVC with an atomically repointed "current"
+    # symlink, keeping the 3 most recent releases — same shape as the Claude Code
+    # deployment, so a bad release is a one-symlink rollback.
+    install_opencode() {
+      RELEASES="$OPENCODE_PREFIX/releases"
+      ACTIVE="$OPENCODE_PREFIX/current"
+      TMP="$RELEASES/opencode.$(date +%Y%m%d%H%M%S).$$"
+      mkdir -p "$RELEASES"
+      npm install -g --prefix "$TMP" "$OPENCODE_NPM_SPEC"
+      "$TMP/bin/opencode" --version
+      ln -sfn "$TMP" "$ACTIVE"
+      find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +4 | xargs -r rm -rf
+    }
+
+    install_opencode
+    "$OPENCODE_BIN" --version
+
+    # ── Credentials (optional) ──────────────────────────────────────────────────
+    # opencode zen's free models work unauthenticated, so the pod starts with no
+    # credentials at all. If OPENCODE_API_KEY is seeded in hermes-agent-secrets, write
+    # it into OpenCode's credential store to unlock the account's other models
+    # (only meaningful together with OPENCODE_BRIDGE_FREE_ONLY=false).
+    AUTH_DIR="$HOME/.local/share/opencode"
+    mkdir -p "$AUTH_DIR"
+    chmod 0700 "$AUTH_DIR"
+    if [ -n "${OPENCODE_API_KEY:-}" ]; then
+      ( umask 077
+        printf '{"opencode":{"type":"api","key":"%s"}}\n' "$OPENCODE_API_KEY" > "$AUTH_DIR/auth.json" )
+      echo "opencode credentials installed for provider 'opencode'"
+    else
+      echo "no OPENCODE_API_KEY set — using the free tier (opencode/*-free models)" >&2
+    fi
+
+    # ── Read-only kubectl ───────────────────────────────────────────────────────
+    # init-kubectl installs the real binary at $KUBECTL_REAL. OpenCode's bash tool is
+    # granted flatly (a per-pattern allowlist with a catch-all deny removes bash
+    # entirely — see configmap-opencode-config.yaml), so the verb allowlist lives in
+    # the kubectl-ro wrapper: it sits earlier on PATH than the real binary and rejects
+    # every mutating verb before it reaches the API server. The read-only RBAC
+    # (rbac/04-clusterrole-readonly.yaml) remains the hard backstop.
+    test -x "$KUBECTL_REAL"
+    mkdir -p "$(dirname "$KUBECTL_WRAPPER")"
+    install -m 0755 /app/kubectl-ro "$KUBECTL_WRAPPER"
+    "$KUBECTL_WRAPPER" version --client=true 2>/dev/null | head -1
+    # Some tools bypass PATH; make the wrapper the answer there too.
+    ln -sf "$KUBECTL_WRAPPER" /usr/local/bin/kubectl
+
+    # ── Daily refresh ───────────────────────────────────────────────────────────
+    (
+      while sleep "$OPENCODE_UPDATE_INTERVAL_SECONDS"; do
+        install_opencode || echo "OpenCode daily update failed" >&2
+      done
+    ) &
+
+    mkdir -p "$HOME" "$OPENCODE_BRIDGE_CWD"
+
+    # Fail fast and loudly if the permission policy did not load: without it the agent
+    # would still answer, but with write/edit tools the posture is meant to remove.
+    echo "opencode resolved config (OPENCODE_CONFIG=$OPENCODE_CONFIG):"
+    "$OPENCODE_BIN" debug config 2>/dev/null | head -25 || true
+    "$OPENCODE_BIN" debug config 2>/dev/null | grep -q '"write": *"deny"' \
+      || echo "WARNING: opencode policy did not load — write is NOT denied. Check OPENCODE_CONFIG." >&2
+
+    # ── Bridge ──────────────────────────────────────────────────────────────────
+    # Flags mirror the env names, so `kubectl exec ... -- env | grep OPENCODE_`
+    # explains the running process. Booleans are expanded here rather than passed
+    # through as empty strings.
+    FREE_ONLY_FLAG="--free-only"
+    if [ "${OPENCODE_BRIDGE_FREE_ONLY:-true}" != "true" ]; then
+      FREE_ONLY_FLAG="--no-free-only"
+    fi
+    SESSION_FLAG="--delete-sessions"
+    if [ "${OPENCODE_BRIDGE_DELETE_SESSIONS:-1}" = "0" ]; then
+      SESSION_FLAG="--keep-sessions"
+    fi
+    EXTRA_FLAGS=""
+    if [ "${OPENCODE_BRIDGE_SHOW_TOOLS:-0}" = "1" ]; then
+      EXTRA_FLAGS="$EXTRA_FLAGS --show-tools"
+    fi
+    if [ "${OPENCODE_BRIDGE_SHOW_REASONING:-0}" = "1" ]; then
+      EXTRA_FLAGS="$EXTRA_FLAGS --show-reasoning"
+    fi
+    if [ -n "${OPENCODE_BRIDGE_AGENT:-}" ]; then
+      EXTRA_FLAGS="$EXTRA_FLAGS --agent $OPENCODE_BRIDGE_AGENT"
+    fi
+    if [ -n "${OPENCODE_BRIDGE_VARIANT:-}" ]; then
+      EXTRA_FLAGS="$EXTRA_FLAGS --variant $OPENCODE_BRIDGE_VARIANT"
+    fi
+    if [ -n "${OPENCODE_BRIDGE_MODELS:-}" ]; then
+      EXTRA_FLAGS="$EXTRA_FLAGS --models $OPENCODE_BRIDGE_MODELS"
+    fi
+
+    # shellcheck disable=SC2086
+    exec python3 /app/opencode_bridge.py \
+      --host "$OPENCODE_BRIDGE_HOST" \
+      --port "$OPENCODE_BRIDGE_PORT" \
+      --opencode-bin "$OPENCODE_BIN" \
+      --cwd "$OPENCODE_BRIDGE_CWD" \
+      --model "$OPENCODE_BRIDGE_MODEL" \
+      --model-providers "$OPENCODE_BRIDGE_MODEL_PROVIDERS" \
+      --max-prompt-chars "$OPENCODE_BRIDGE_MAX_PROMPT_CHARS" \
+      --timeout "$OPENCODE_BRIDGE_TIMEOUT" \
+      --max-concurrency "$OPENCODE_BRIDGE_MAX_CONCURRENCY" \
+      --queue-wait "$OPENCODE_BRIDGE_QUEUE_WAIT" \
+      --model-refresh-interval "$OPENCODE_BRIDGE_MODEL_REFRESH_INTERVAL" \
+      --model-cache "$OPENCODE_BRIDGE_MODEL_CACHE" \
+      $FREE_ONLY_FLAG \
+      $SESSION_FLAG \
+      $EXTRA_FLAGS \
+      --api-key "$OPENCODE_BRIDGE_API_KEY"
+
+  # Read-only kubectl wrapper, installed onto the PVC at $KUBECTL_WRAPPER by the
+  # startup script above and placed earlier on PATH than the real binary. Kept as its
+  # own file (not a heredoc inside the script) so it stays reviewable and so YAML block
+  # indentation can never corrupt its shebang.
+  kubectl-ro: |
+    #!/bin/sh
+    # Read-only kubectl: allowlisted verbs only, Secrets refused outright.
+    # Layer 2 of 4 — see configmap-opencode-config.yaml for the full posture.
+    set -eu
+    REAL="${KUBECTL_REAL:-/opt/data/kubectl/kubectl}"
+
+    # Find the verb, which is NOT always $1: `kubectl -n demo get pods` and
+    # `kubectl --namespace=demo patch ...` are both valid, so leading global flags have
+    # to be skipped (and the value of a value-taking flag skipped with it). Reading $1
+    # blindly refused perfectly legal read commands — observed live, when the agent's
+    # `kubectl --namespace demo patch ...` was rejected because $1 was `--namespace`.
+    # Unparseable input still ends with an empty verb, which falls through to the
+    # deny branch below — this stays fail-closed.
+    # The sub-verb (`auth can-i`, `config view`) is found the same way, so it is the
+    # next non-flag token after the verb rather than a blind $2.
+    verb=""
+    subverb=""
+    skip_next=0
+    for arg in "$@"; do
+      if [ "$skip_next" -eq 1 ]; then
+        skip_next=0
+        continue
+      fi
+      case "$arg" in
+        --*=*) continue ;;   # --namespace=demo — value is attached, nothing to skip
+        -n|--namespace|--context|--cluster|--user|--kubeconfig|-s|--server|--token\
+          |--as|--as-group|--as-uid|--certificate-authority|--client-certificate\
+          |--client-key|--request-timeout|--cache-dir|--tls-server-name|-v|--v)
+          skip_next=1
+          continue
+          ;;
+        -*) continue ;;      # any other flag (boolean global flag)
+        *)
+          if [ -z "$verb" ]; then
+            verb="$arg"
+          else
+            subverb="$arg"
+            break
+          fi
+          ;;
+      esac
+    done
+
+    allowed=0
+    case "$verb" in
+      get|describe|logs|top|events|explain|api-resources|api-versions|version|cluster-info|"")
+        allowed=1
+        ;;
+      auth)
+        # `auth can-i` is diagnostic; `auth reconcile` writes RBAC.
+        if [ "$subverb" = "can-i" ]; then
+          allowed=1
+        else
+          echo "kubectl: only 'auth can-i' is permitted on this agent." >&2
+          exit 77
+        fi
+        ;;
+      config)
+        # Reading the kubeconfig is fine; `config set-*` / `use-context` mutate it.
+        case "$subverb" in
+          view|get-contexts|current-context|get-clusters|get-users) allowed=1 ;;
+          *)
+            echo "kubectl: only read-only 'config view|get-*|current-context' is permitted." >&2
+            exit 77
+            ;;
+        esac
+        ;;
+    esac
+    # Opt-in write verbs. EMPTY BY DEFAULT — the base deployment is read-only. A demo
+    # overlay (../../../opencode-demo) sets KUBECTL_EXTRA_WRITE_VERBS to a
+    # space-separated list (e.g. "patch set rollout") to open a narrow, temporary write
+    # path without forking this script. RBAC still bounds what those verbs can touch,
+    # so widening this list cannot by itself grant more than the ServiceAccount has.
+    if [ "$allowed" -eq 0 ] && [ -n "${KUBECTL_EXTRA_WRITE_VERBS:-}" ]; then
+      for extra in $KUBECTL_EXTRA_WRITE_VERBS; do
+        if [ "$verb" = "$extra" ]; then
+          allowed=1
+          break
+        fi
+      done
+    fi
+    if [ "$allowed" -eq 0 ]; then
+      echo "kubectl: verb '$verb' is blocked — this agent is read-only." >&2
+      echo "Permitted: get, describe, logs, top, events, explain, api-resources," >&2
+      echo "           api-versions, version, cluster-info, auth can-i, config view." >&2
+      if [ -n "${KUBECTL_EXTRA_WRITE_VERBS:-}" ]; then
+        echo "Additionally granted right now: $KUBECTL_EXTRA_WRITE_VERBS" >&2
+      fi
+      exit 77
+    fi
+    # Secrets are excluded by RBAC as well; refusing here makes the reason unambiguous
+    # instead of surfacing as a generic 403.
+    for arg in "$@"; do
+      case "$arg" in
+        secret|secrets|secret/*|secrets/*|secrets.*|*/secrets)
+          echo "kubectl: reading Secrets is not permitted on this agent." >&2
+          exit 77
+          ;;
+      esac
+    done
+    exec "$REAL" "$@"

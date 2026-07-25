@@ -1,0 +1,39 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── OpenCode demo overlay ──────────────────────────────────────────────────
+# Layers on top of the read-only OpenCode base (../opencode/kubernetes) and, on a single
+# `kubectl apply -k .`, opens all three write gates declaratively:
+#   • 01 — deploys the broken Deployment into namespace `demo`
+#   • 02 — Gate 1 (RBAC): additive ClusterRole, Deployments only
+#   • 04 — Gate 2 (harness): KUBECTL_EXTRA_WRITE_VERBS="patch set rollout"
+#   • 03 — Gate 3 (skill): swaps the active skill for the demo-writer variant
+#
+# Deploy with `kubectl apply -k .` (NOT `-f` — this is a Kustomize overlay).
+# Revert with `kubectl apply -k ../opencode/kubernetes` + deleting 01 and 02.
+resources:
+  - ../opencode/kubernetes
+  - 01-broken-deployment.yaml
+  - 02-grant-deploy-write.yaml
+
+# Gate 2 (harness): strategic-merge patch that adds exactly three mutating verbs to the
+# kubectl wrapper's allowlist. Because the base ships the key as "" (read-only),
+# re-applying the base is a complete revert — no runtime `kubectl patch`, no ordering
+# trap, and no `bypassPermissions`-style posture committed to git.
+patches:
+  - path: 04-grant-harness-write.yaml
+
+# Gate 3 (skill): override just the `lead-devops-sre.SKILL.md` key of the existing skill
+# ConfigMap. `behavior: merge` keeps the base ConfigMap and swaps this one file, so
+# init-hermes-config syncs the demo-writer skill to /opt/data/skills on the next roll.
+# The same file is what OpenCode loads via its `instructions` list, so both sides of the
+# bridge get the demo brief from one source.
+configMapGenerator:
+  - name: hermes-agent-declarative-skills
+    namespace: devops-agent
+    behavior: merge
+    files:
+      - lead-devops-sre.SKILL.md=03-demo-writer.SKILL.md
+
+generatorOptions:
+  disableNameSuffixHash: true

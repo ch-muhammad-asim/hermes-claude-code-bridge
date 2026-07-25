@@ -1,0 +1,8 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Read-only RBAC for the Hermes agent: observe cluster-wide, never secrets, never writes.
+resources:
+  - 01-serviceaccount.yaml
+  - 02-role.yaml
+  - 03-rolebinding.yaml
+  - 04-clusterrole-readonly.yaml

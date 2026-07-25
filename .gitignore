@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets / local config — never commit real values (templates are *.template.yaml)
+secret.yaml
+secret-*.yaml
+!*.template.yaml
+*.pem
+*.key
+.env
+.env.*
+*-kubeconfig
+kubeconfig
+
+# Logs & runtime
+*.log
+proxy-sessions.json
+.claude-code-bridge.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

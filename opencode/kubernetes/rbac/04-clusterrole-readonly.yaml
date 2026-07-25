@@ -1,0 +1,147 @@
+# 🌐 Cluster-wide SRE/DevOps inspection ClusterRole (OpenCode deployment).
+#
+# NOTE: named hermes-opencode-cluster-readonly — deliberately distinct from the Claude
+# Code deployment's hermes-cluster-readonly. ClusterRoles are cluster-scoped, so sharing
+# a name would mean `kubectl apply -k` on one stack silently rewriting the other's
+# cluster-wide grant. The rule set itself is identical: read-only, no secrets.
+#
+# Purpose: let the Hermes agent answer questions such as:
+#   - how many nodes are in the cluster?
+#   - which pods are failing, pending, crash-looping, or unschedulable?
+#   - what events explain the issue?
+#   - what RBAC/network-policy/ingress/storage guardrail is blocking something?
+#
+# Security model:
+#   - Cluster-wide permissions are READ-ONLY only: get/list/watch.
+#   - Secrets are deliberately absent everywhere.
+#   - Workload mutation is NOT granted cluster-wide.
+#   - RBAC read is allowed so a lead SRE can diagnose authorization/guardrail issues,
+#     but privilege escalation is blocked because no create/patch/update/delete verbs are granted.
+#   - The separate namespaced Role grants additional namespace-local READS only (e.g. configmaps).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hermes-opencode-cluster-readonly
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+rules:
+  # Core cluster state and scheduling signals.
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - pods/log
+      - pods/status
+      - events
+      - services
+      - endpoints
+      - persistentvolumes
+      - persistentvolumeclaims
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+
+  # Workload/controller inspection across namespaces.
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/status
+      - replicasets
+      - replicasets/status
+      - statefulsets
+      - statefulsets/status
+      - daemonsets
+      - daemonsets/status
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - jobs/status
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+
+  # Networking/ingress guardrails.
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingressclasses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+      - serverstransports
+    verbs: ["get", "list", "watch"]
+
+  # Storage and node capacity context.
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+      - csidrivers
+      - csinodes
+    verbs: ["get", "list", "watch"]
+
+  # Metrics for SRE triage when metrics-server is installed.
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+  # RBAC guardrail inspection only. No write verbs, no escalation.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+
+  # Common policy/admission objects used as guardrails.
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs: ["get", "list", "watch"]
+
+# ⛔ Intentionally NOT granted anywhere (deny-by-default):
+#   - secrets, serviceaccounts/token, tokenreviews, subjectaccessreviews
+#   - configmaps cluster-wide, because teams sometimes store sensitive values there
+#   - create/patch/update/delete on cluster-wide resources
+#   - namespace writes, node writes, RBAC writes, CRD writes, webhook writes
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hermes-opencode-cluster-readonly
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+subjects:
+  - kind: ServiceAccount
+    name: hermes-agent
+    namespace: devops-agent
+roleRef:
+  kind: ClusterRole
+  name: hermes-opencode-cluster-readonly
+  apiGroup: rbac.authorization.k8s.io

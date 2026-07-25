@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-claude-bridge-startup
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: claude-bridge
+    app.kubernetes.io/part-of: devops-agent
+data:
+  start-claude-bridge.sh: |
+    #!/bin/sh
+    set -eu
+
+    apt-get update
+    apt-get install -y --no-install-recommends python3 curl ca-certificates jq openssl
+    rm -rf /var/lib/apt/lists/*
+
+    install_claude_code() {
+      RELEASES="$CLAUDE_CODE_PREFIX/releases"
+      ACTIVE="$CLAUDE_CODE_PREFIX/current"
+      TMP="$RELEASES/claude-code.$(date +%Y%m%d%H%M%S).$$"
+      mkdir -p "$RELEASES"
+      npm install -g --prefix "$TMP" "$CLAUDE_CODE_NPM_SPEC"
+      "$TMP/bin/claude" --version
+      ln -sfn "$TMP" "$ACTIVE"
+      find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +4 | xargs -r rm -rf
+    }
+
+    install_claude_code
+    "$CLAUDE_BIN" --version
+
+    install_github_mcp() {
+      # Resolve the release tag. GITHUB_MCP_VERSION=latest (default) always installs
+      # the newest published release; pin it to a tag (e.g. v1.4.0) to freeze it.
+      repo="${GITHUB_MCP_REPO:-github/github-mcp-server}"
+      want="${GITHUB_MCP_VERSION:-latest}"
+      if [ "$want" = "latest" ]; then
+        tag="$(curl -fsSL --retry 3 --retry-delay 2 \
+          "https://api.github.com/repos/${repo}/releases/latest" \
+          | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+        [ -n "$tag" ] || { echo "could not resolve latest github-mcp-server release" >&2; return 1; }
+      else
+        tag="$want"
+      fi
+
+      # Map the node arch to the release asset naming.
+      case "$(uname -m)" in
+        x86_64|amd64)  arch="x86_64" ;;
+        aarch64|arm64) arch="arm64" ;;
+        *) echo "unsupported arch $(uname -m) for github-mcp-server" >&2; return 1 ;;
+      esac
+      asset="github-mcp-server_Linux_${arch}.tar.gz"
+      base="https://github.com/${repo}/releases/download/${tag}"
+
+      # GITHUB_MCP_BIN is a stable symlinked path (.../current/github-mcp-server); each
+      # version installs into a sibling .../<tag>/ dir and "current" is repointed atomically.
+      mcp_root="$(dirname "$(dirname "$GITHUB_MCP_BIN")")"
+      bin_name="$(basename "$GITHUB_MCP_BIN")"
+      versioned_dir="${mcp_root}/${tag}"
+      current_link="${mcp_root}/current"
+
+      if [ -x "${versioned_dir}/${bin_name}" ]; then
+        ln -sfn "$versioned_dir" "$current_link"
+        "$GITHUB_MCP_BIN" --version
+        return 0
+      fi
+
+      TMP_DIR="$(mktemp -d)"
+      trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+      curl -fsSL --retry 3 --retry-delay 2 -o "$TMP_DIR/$asset" "${base}/${asset}"
+      # Integrity: verify against the release's own checksums file (no hardcoded SHA,
+      # so this keeps working as "latest" advances). Skip with a warning if absent.
+      if curl -fsSL --retry 3 --retry-delay 2 -o "$TMP_DIR/checksums.txt" "${base}/checksums.txt"; then
+        ( cd "$TMP_DIR" && grep " ${asset}\$" checksums.txt | sha256sum -c - )
+      else
+        echo "warning: checksums.txt not published for ${tag}; skipping checksum verification" >&2
+      fi
+      tar -xzf "$TMP_DIR/$asset" -C "$TMP_DIR"
+      test -x "$TMP_DIR/github-mcp-server"
+      mkdir -p "$versioned_dir"
+      install -m 0755 "$TMP_DIR/github-mcp-server" "${versioned_dir}/${bin_name}"
+      ln -sfn "$versioned_dir" "$current_link"
+      rm -rf "$TMP_DIR"
+      trap - EXIT HUP INT TERM
+      "$GITHUB_MCP_BIN" --version
+    }
+
+    install_github_mcp
+
+    # $CLAUDE_BIN lives under $CLAUDE_CODE_PREFIX/current/bin, which is not on PATH.
+    # Expose it at /opt/data/bin (already on PATH and on the shared PVC) so an
+    # interactive `claude` resolves, mirroring how kubectl is exposed below. The
+    # symlink points at the stable "current" path so it survives daily updates.
+    mkdir -p /opt/data/bin
+    ln -sf "$CLAUDE_BIN" /opt/data/bin/claude
+    ln -sf "$GITHUB_MCP_BIN" /opt/data/bin/github-mcp-server
+
+    (
+      while sleep "$CLAUDE_CODE_UPDATE_INTERVAL_SECONDS"; do
+        install_claude_code || echo "Claude Code daily update failed" >&2
+        install_github_mcp  || echo "github-mcp-server daily update failed" >&2
+      done
+    ) &
+
+    # init-kubectl installs kubectl onto the shared PVC before this container starts.
+    # Expose it at the usual location too, so tools that bypass PATH still work.
+    test -x /opt/data/bin/kubectl
+    ln -sf /opt/data/bin/kubectl /usr/local/bin/kubectl
+    kubectl version --client=true 2>/dev/null | head -1
+
+    # GCP MCP auth bridge: fronts the Google MCP endpoints on 127.0.0.1:19190 and
+    # injects a fresh Google bearer, so Claude and Hermes never run the
+    # (broken-for-Google) interactive MCP OAuth flow. Auto-restarts. Enabled by either:
+    #   - GCP_MCP_WORKLOAD_IDENTITY=true  -> RECOMMENDED: tokens from the GKE metadata
+    #     server for the KSA-bound Google service account (keyless), or
+    #   - GOOGLE_MCP_OAUTH_REFRESH_TOKEN seeded in hermes-agent-google-oauth -> the
+    #     OAuth-app fallback. The bridge itself auto-selects the source.
+    if [ "${GCP_MCP_WORKLOAD_IDENTITY:-false}" = "true" ] || [ -n "${GOOGLE_MCP_OAUTH_REFRESH_TOKEN:-}" ]; then
+      (
+        while true; do
+          python3 /app/gcp_mcp_auth_bridge.py \
+            || echo "gcp-mcp-auth-bridge exited ($?); restarting in 5s" >&2
+          sleep 5
+        done
+      ) &
+    else
+      echo "GCP MCP auth bridge disabled (set GCP_MCP_WORKLOAD_IDENTITY=true for Workload Identity, or seed GOOGLE_MCP_OAUTH_REFRESH_TOKEN for the OAuth app)" >&2
+    fi
+
+    mkdir -p "$HOME" "$CLAUDE_CODE_PROXY_CWD" "$CLAUDE_CODE_MEMORY_DIR" "$HERMES_SKILLS_DIR"
+    chmod 0750 "$CLAUDE_CODE_MEMORY_DIR"
+    chmod 0750 "$HERMES_SKILLS_DIR"
+
+    PASS_MODEL_FLAG=""
+    if [ "${CLAUDE_CODE_PASS_MODEL:-false}" = "true" ]; then
+      PASS_MODEL_FLAG="--pass-model"
+    fi
+
+    # shellcheck disable=SC2086
+    exec python3 /app/claude_code_bridge.py \
+      --host "$CLAUDE_CODE_PROXY_HOST" \
+      --port "$CLAUDE_CODE_PROXY_PORT" \
+      --claude-bin "$CLAUDE_BIN" \
+      --cwd "$CLAUDE_CODE_PROXY_CWD" \
+      --additional-dirs "$CLAUDE_CODE_ADDITIONAL_DIRS" \
+      --model "$CLAUDE_CODE_PROXY_MODEL" \
+      --effort "$CLAUDE_CODE_EFFORT" \
+      --permission-mode "$CLAUDE_CODE_PERMISSION_MODE" \
+      --max-budget-usd "$CLAUDE_CODE_MAX_BUDGET_USD" \
+      $PASS_MODEL_FLAG \
+      --allowed-tools "$CLAUDE_CODE_ALLOWED_TOOLS" \
+      --disallowed-tools "$CLAUDE_CODE_DISALLOWED_TOOLS" \
+      --api-key "$CLAUDE_CODE_PROXY_API_KEY"

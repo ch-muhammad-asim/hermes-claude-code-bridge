@@ -1,0 +1,29 @@
+# A deliberately broken deployment for the demo: nginx:faulty is a tag that does not
+# exist on Docker Hub, so the pod lands in ImagePullBackOff — the issue Hermes fixes.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-nginx
+  namespace: demo
+  labels:
+    app: demo-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-nginx
+  template:
+    metadata:
+      labels:
+        app: demo-nginx
+    spec:
+      containers:
+        - name: demo-nginx            # container name == deployment name
+          image: nginx:faulty         # 👈 broken on purpose (nonexistent tag)
+          ports:
+            - containerPort: 80
