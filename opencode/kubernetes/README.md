@@ -39,12 +39,23 @@ kubectl create namespace devops-agent
 export API_SERVER_KEY="$(openssl rand -hex 32)"
 export OPENCODE_BRIDGE_API_KEY="$(openssl rand -hex 32)"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
-# Hash must come from the SAME Hermes image the StatefulSet runs:
+# Dashboard password + hash. Hermes hashes with scrypt, so the hash MUST come from
+# Hermes' own hash_password() in the SAME image the StatefulSet runs — a generic
+# bcrypt/sha256 hash is accepted by kubectl but silently rejects every login.
+# --entrypoint is required: it bypasses the image's s6-overlay init, which would
+# otherwise boot the supervisor and pollute stdout.
+export HERMES_DASHBOARD_PASSWORD="$(python3 -c 'import secrets,string; print("".join(secrets.choice(string.ascii_letters+string.digits+"-_+=") for _ in range(56)))')"
+echo "Save this dashboard password now: $HERMES_DASHBOARD_PASSWORD"
 export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$(
-  docker run --rm nousresearch/hermes-agent:v2026.7.20 \
-    /opt/hermes/.venv/bin/python -c \
-    'import bcrypt,getpass; print(bcrypt.hashpw(getpass.getpass().encode(),bcrypt.gensalt()).decode())'
+  docker run --rm \
+    --entrypoint /opt/hermes/.venv/bin/python \
+    -e PYTHONPATH=/opt/hermes \
+    -e HERMES_DASHBOARD_PASSWORD="$HERMES_DASHBOARD_PASSWORD" \
+    nousresearch/hermes-agent:v2026.7.20 \
+    -c 'import os; from plugins.dashboard_auth.basic import hash_password; print(hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
 )"
+# sanity check — must start with scrypt$
+echo "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH"
 envsubst < secrets/secret.template.yaml | kubectl apply -f -
 
 # 2) set your domain once, then apply

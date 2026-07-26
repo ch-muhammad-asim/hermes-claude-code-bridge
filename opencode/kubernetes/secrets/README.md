@@ -6,18 +6,33 @@
 export API_SERVER_KEY="$(openssl rand -hex 32)"
 export OPENCODE_BRIDGE_API_KEY="$(openssl rand -hex 32)"
 export HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)"
-export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH='<bcrypt hash>'
+export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH='<scrypt$... hash — see below>'
 
 envsubst < secret.template.yaml | kubectl apply -f -
 ```
 
-Generate the dashboard hash with the **same Hermes image** the StatefulSet runs, so the bcrypt implementation matches:
+Generate the dashboard hash with Hermes' **own** `hash_password()` from the **same image** the
+StatefulSet runs. Hermes hashes with **scrypt**; a generic `bcrypt`/`sha256` hash is accepted by
+`kubectl` but then **silently rejects every login**:
 
 ```bash
-docker run --rm -it nousresearch/hermes-agent:v2026.7.20 \
-  /opt/hermes/.venv/bin/python -c \
-  'import bcrypt,getpass; print(bcrypt.hashpw(getpass.getpass().encode(), bcrypt.gensalt()).decode())'
+export HERMES_DASHBOARD_PASSWORD='<your dashboard password>'
+
+export HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$(
+  docker run --rm \
+    --entrypoint /opt/hermes/.venv/bin/python \
+    -e PYTHONPATH=/opt/hermes \
+    -e HERMES_DASHBOARD_PASSWORD="$HERMES_DASHBOARD_PASSWORD" \
+    nousresearch/hermes-agent:v2026.7.20 \
+    -c 'import os; from plugins.dashboard_auth.basic import hash_password; print(hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
+)"
+echo "$HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH"   # -> scrypt$16384$8$1$...
 ```
+
+> 🧷 **`--entrypoint` is mandatory.** Without it the image's s6-overlay init boots the whole
+> supervisor first, printing service logs and (with `-it`) waiting on a TTY — the hash never lands
+> cleanly in the variable. Passing the password via `-e` rather than `getpass` keeps it
+> non-interactive so it works inside `$( )`.
 
 ## What each value is for
 

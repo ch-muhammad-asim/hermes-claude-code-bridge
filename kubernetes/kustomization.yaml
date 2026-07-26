@@ -30,7 +30,7 @@ configMapGenerator:
 - name: hermes-params
   namespace: devops-agent
   literals:
-  - GCP_PROJECT_ID=playground-s-11-afbc7f7f
+  - GCP_PROJECT_ID=playground-s-11-bc37e943
   - HERMES_DOMAIN=hermes.saqlainmushtaq.com
 generatorOptions:
   disableNameSuffixHash: true
