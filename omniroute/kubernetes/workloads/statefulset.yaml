@@ -1,0 +1,140 @@
+# OmniRoute — StatefulSet.
+#
+# A StatefulSet (not a Deployment) with replicas: 1, because all state lives in a
+# single SQLite database in WAL mode (`/app/data/storage.sqlite` + `-wal`/`-shm`).
+# SQLite allows exactly one writer, so this workload must never be scaled past 1
+# and needs stable, ReadWriteOnce storage — a Deployment with a rolling update
+# would briefly run two pods against the same file and risk corrupting it.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: omniroute
+  labels:
+    app.kubernetes.io/name: omniroute
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: omniroute
+spec:
+  serviceName: omniroute
+  # Do NOT increase. SQLite is a single-writer database.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: omniroute
+  # Recreate rather than surge: never two pods on one SQLite file.
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omniroute
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: omniroute
+    spec:
+      # WAL checkpoint on shutdown — matches the image's documented 40s grace.
+      terminationGracePeriodSeconds: 40
+      securityContext:
+        # The image runs as `node` (uid/gid 1000); fsGroup makes the PVC writable.
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: omniroute
+          # Pinned digest-style tag — `latest` is mutable and not reproducible.
+          # Published multi-arch (linux/amd64 + linux/arm64).
+          image: diegosouzapw/omniroute:3.8.48
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Dashboard, OpenAI-compatible /v1 API, and MCP all share this port.
+            - name: http
+              containerPort: 20128
+          env:
+            - name: DATA_DIR
+              value: /app/data
+            - name: PORT
+              value: "20128"
+            - name: HOSTNAME
+              value: 0.0.0.0
+            # Node heap ceiling. Keep below the memory limit below.
+            - name: OMNIROUTE_MEMORY_MB
+              value: "1024"
+            # Client API keys can only be minted in OmniRoute's dashboard (they live in
+            # its database), so there is no way to seed one declaratively. Requiring a key
+            # would therefore make the stack dead on arrival: Hermes would start with an
+            # empty key and every message would fail with "HTTP 401: Invalid API key"
+            # until someone logged in and patched a key in by hand.
+            #
+            # This endpoint is not public: `/v1` is only served on a ClusterIP Service,
+            # the Traefik route exposes the dashboard (which has its own login), and
+            # optional/networkpolicy.yaml can restrict :20128 to the Hermes pod alone.
+            #
+            # Flip to "true" if you expose /v1 beyond the cluster — then mint a key in
+            # Settings → API Keys and patch it into OMNIROUTE_CLIENT_API_KEY in the
+            # hermes-secrets Secret.
+            - name: REQUIRE_API_KEY
+              value: "false"
+            # Serving over TLS via the IngressRoute, so secure cookies are valid.
+            - name: AUTH_COOKIE_SECURE
+              value: "true"
+            # Must match the public origin or provider OAuth callbacks redirect wrong.
+            - name: BASE_URL
+              value: https://omniroute.example.com
+            - name: NEXT_PUBLIC_BASE_URL
+              value: https://omniroute.example.com
+          envFrom:
+            # JWT_SECRET, API_KEY_SECRET, INITIAL_PASSWORD (+ optional
+            # STORAGE_ENCRYPTION_KEY / OMNIROUTE_WS_BRIDGE_SECRET / REDIS_URL).
+            - secretRef:
+                name: omniroute-secrets
+          # Boot takes ~15-25s (migrations + runtime hydration): let the startup
+          # probe absorb that instead of letting liveness kill the pod early.
+          startupProbe:
+            httpGet:
+              path: /api/monitoring/health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/monitoring/health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /api/monitoring/health
+              port: http
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            # Measured idle: ~510Mi RSS with a 1024MB heap ceiling.
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # the app writes /app/data and /tmp
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        # ReadWriteOnce is correct and sufficient — one writer, one pod.
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # Uncomment to pin a class (GKE: standard-rwo / premium-rwo).
+        # storageClassName: standard-rwo

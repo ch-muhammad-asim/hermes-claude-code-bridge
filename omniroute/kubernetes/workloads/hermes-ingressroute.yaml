@@ -1,0 +1,36 @@
+# Traefik v3 IngressRoute for the Hermes dashboard + API.
+#
+# Separate host from OmniRoute's route so the two UIs stay distinct:
+#   omniroute.example.com → OmniRoute (providers, routing, quotas)
+#   hermes.example.com    → Hermes    (agent chat, sessions, skills)
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: hermes
+  labels:
+    app.kubernetes.io/name: hermes
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: omniroute
+spec:
+  ingressClassName: traefik-external
+  entryPoints:
+    - websecure
+  tls: {}
+  routes:
+    # Hermes' API server and dashboard listen on different ports, so the /v1 API
+    # path is routed explicitly ahead of the catch-all dashboard rule.
+    - match: Host(`hermes.example.com`) && PathPrefix(`/v1`)
+      kind: Rule
+      services:
+        - name: hermes
+          port: 8642
+    - match: Host(`hermes.example.com`) && PathPrefix(`/health`)
+      kind: Rule
+      services:
+        - name: hermes
+          port: 8642
+    - match: Host(`hermes.example.com`)
+      kind: Rule
+      services:
+        - name: hermes
+          port: 9119

@@ -76,11 +76,18 @@ Every deployment exposes the same endpoint: **`http://<host>:18181/v1`** (model 
 | 🆓 | **OpenCode — desktop** | Zero-cost local chats in Hermes via the OpenCode CLI — runs alongside the Claude bridge on `:18282` | [`opencode/hermes-desktop/`](./opencode/hermes-desktop) |
 | 🆓 | **OpenCode — Kubernetes** | Zero-cost production SRE agent on GKE: bridge sidecar, four-layer read-only posture, Traefik dashboard | [`opencode/kubernetes/`](./opencode/kubernetes) |
 
+**Many providers behind one endpoint:**
+
+| | Environment | Best for | Guide |
+|---|-------------|----------|-------|
+| 🧭 | **OmniRoute — Docker** | Self-hosted gateway fanning one OpenAI-compatible endpoint out to many providers, on a laptop via Compose | [`omniroute/docker/`](./omniroute/docker) |
+| 🧭 | **OmniRoute — Kubernetes** | The same gateway in a cluster: StatefulSet + PVC (SQLite/WAL), non-root, API-key enforced, Traefik TLS | [`omniroute/kubernetes/`](./omniroute/kubernetes) |
+
 **Supporting infra for the Kubernetes path:**
 
 | | Component | Purpose | Guide |
 |---|---|---|---|
-| ☁️ | **GCP / GKE** | Provision a cost-optimized VPC + GKE cluster (Workload Identity, on-demand 3-node) | [`gcp/`](./gcp) |
+| ☁️ | **GCP / GKE** | Provision a cost-optimized VPC + GKE cluster (Workload Identity, on-demand 3-node) — one command via [`gcp-infra.sh`](./gcp/gcp-infra.sh) | [`gcp/`](./gcp) |
 | 🚦 | **Traefik v3** | TLS ingress controller for the dashboard/API `IngressRoute` (chart-pinned CRDs) | [`kubernetes/traefik/`](./kubernetes/traefik) |
 | 🎬 | **DevOps demo** | Break a deployment, watch Hermes diagnose & fix it, then revoke — a read-only → scoped-grant → revoke showcase | [`hermes-agent-devops-demo/`](./hermes-agent-devops-demo) |
 | 🎬 | **DevOps demo (OpenCode)** | The same three-gate diagnose-and-fix story on **free** models, at $0 inference | [`opencode-demo/`](./opencode-demo) |

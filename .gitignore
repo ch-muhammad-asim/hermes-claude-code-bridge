@@ -7,16 +7,44 @@ __pycache__/
 venv/
 env/
 
-# Secrets / local config — never commit real values (templates are *.template.yaml)
-secret.yaml
-secret-*.yaml
-!*.template.yaml
-*.pem
-*.key
+# ── Secrets / local config — never commit real values ────────────────────────
+# Anything whose name contains "secret" is excluded, so a rendered Secret picks up
+# the rule no matter what it is called (secret.yaml, omniroute-secrets.yaml,
+# rendered-secret.yml, …). Templates and examples are re-allowed at the bottom.
+*secret*.yaml
+*secret*.yml
+*secret*.json
+secrets/*.yaml
+!secrets/*.template.yaml
+
+# Env files. `.env.*` also covers `.env.example`, which is why the shipped templates
+# are named `env.example` (no leading dot).
 .env
 .env.*
-*-kubeconfig
+
+# Keys, certs and credential blobs
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+*credentials*.json
+creds*.json
+service-account*.json
+sa-key*.json
+
+# Kubeconfigs
 kubeconfig
+*-kubeconfig
+*.kubeconfig
+
+# Re-allow the tracked templates/examples (must stay last to win)
+!*.template.yaml
+!*.template.yml
+!*.example
+!*example*.yaml
+!env.example
 
 # Logs & runtime
 *.log

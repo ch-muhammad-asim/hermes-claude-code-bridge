@@ -1,0 +1,67 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  OmniRoute — local Docker Compose
+#
+#  Runs the published multi-arch image (amd64 + arm64) from Docker Hub. Nothing
+#  is built from source, so this works on Apple Silicon, Intel, and Linux alike.
+#
+#    cp env.example .env && ./generate-secrets.sh >> .env   # once
+#    docker compose up -d
+#    open http://localhost:20128
+#
+#  Optional Redis (shared rate-limit state; the app falls back to in-memory
+#  rate limiting when REDIS_URL is unset):
+#
+#    docker compose --profile redis up -d
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  omniroute:
+    # Pinned on purpose: `latest` is mutable and not reproducible.
+    image: diegosouzapw/omniroute:${OMNIROUTE_VERSION:-3.8.48}
+    container_name: omniroute
+    restart: unless-stopped
+    # SQLite runs in WAL mode — give it time to checkpoint on shutdown or the
+    # database can be left needing recovery on the next boot.
+    stop_grace_period: 40s
+    env_file: .env
+    environment:
+      # Must match the volume mount below; the image already defaults to this.
+      - DATA_DIR=/app/data
+      - PORT=${PORT:-20128}
+      - OMNIROUTE_MEMORY_MB=${OMNIROUTE_MEMORY_MB:-1024}
+    ports:
+      # Dashboard + OpenAI-compatible API + MCP all share this one port.
+      - "${PORT:-20128}:20128"
+    volumes:
+      # Named volume, not a host bind: the container runs as uid 1000 (`node`),
+      # and Docker initialises a named volume with the image's ownership. A bind
+      # mount would inherit host ownership and fail to write on first boot.
+      - omniroute-data:/app/data
+    healthcheck:
+      # The image ships its own probe (hits /api/monitoring/health internally).
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # ── Optional: Redis for shared/persistent rate-limit state ──────────────────
+  # Without it the log prints "REDIS_URL is not set in production. Using
+  # in-memory rate limiting." — which is fine for a single local instance.
+  redis:
+    image: redis:7-alpine
+    container_name: omniroute-redis
+    restart: unless-stopped
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - omniroute-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    profiles: [redis]
+
+volumes:
+  omniroute-data:
+  omniroute-redis-data:

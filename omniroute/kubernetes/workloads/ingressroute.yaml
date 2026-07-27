@@ -1,0 +1,28 @@
+# Traefik v3 IngressRoute for the OmniRoute dashboard + API.
+#
+# Requires the Traefik CRDs and a controller watching the class below — the
+# chart-pinned install in this repo lives at ../../../kubernetes/traefik/.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: omniroute
+  labels:
+    app.kubernetes.io/name: omniroute
+    app.kubernetes.io/component: dashboard
+    app.kubernetes.io/part-of: omniroute
+spec:
+  # Declared in spec, not via a kubernetes.io/ingress.class annotation: an
+  # annotation naming a class no Traefik instance watches is silently ignored and
+  # the route never becomes live. Keep this aligned with your Traefik install.
+  ingressClassName: traefik-external
+  entryPoints:
+    - websecure
+  tls: {}
+  routes:
+    # Dashboard, /v1 API and MCP are all served by the same port, so one rule
+    # covers everything. Split it only if you want different middlewares per path.
+    - match: Host(`omniroute.example.com`)
+      kind: Rule
+      services:
+        - name: omniroute
+          port: 20128

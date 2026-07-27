@@ -1,0 +1,176 @@
+# Init script that points Hermes at OmniRoute as its model provider.
+#
+# Unlike the Claude Code / OpenCode deployments in this repo, there is NO bridge
+# sidecar here: OmniRoute already speaks the OpenAI-compatible protocol, so Hermes
+# talks to its Service directly over the cluster network.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-omniroute-config
+  labels:
+    app.kubernetes.io/name: hermes
+    app.kubernetes.io/component: runtime-config
+    app.kubernetes.io/part-of: omniroute
+data:
+  init-hermes-config.sh: |
+    #!/bin/bash
+    set -eu
+    mkdir -p "$HERMES_HOME" "$HERMES_HOME/memory" "$HERMES_HOME/skills"
+    chmod 0770 "$HERMES_HOME/memory" "$HERMES_HOME/skills"
+
+    export HERMES_HOME
+    # Strip Hermes' bundled skill catalogue: a smaller system prompt is cheaper and
+    # keeps the agent focused. Idempotent across restarts.
+    /opt/hermes/.venv/bin/hermes skills opt-out --remove --yes 2>&1 | tail -1 || true
+
+    /opt/hermes/.venv/bin/python - <<'PY'
+    from pathlib import Path
+    import json
+    import os
+    import time
+    import urllib.error
+    import urllib.request
+
+    import yaml
+
+    PROVIDER_ID = os.environ.get("HERMES_DEFAULT_PROVIDER", "omniroute")
+    BASE_URL = os.environ.get("HERMES_DEFAULT_BASE_URL", "http://omniroute:20128/v1")
+    DEFAULT_MODEL = os.environ.get("HERMES_DEFAULT_MODEL", "oc/deepseek-v4-flash-free")
+    API_MODE = os.environ.get("HERMES_DEFAULT_API_MODE", "chat_completions")
+    CONTEXT_LENGTH = int(os.environ.get("HERMES_DEFAULT_CONTEXT_LENGTH", "200000") or 200000)
+    API_KEY = os.environ.get("OMNIROUTE_CLIENT_API_KEY", "")
+    # ── Which models the dashboard picker may offer ──────────────────────────────
+    #
+    # Default "*": offer everything OmniRoute advertises, with no filtering. OmniRoute is
+    # the router — it owns which providers are connected, routing strategy and fallback —
+    # so Hermes should not second-guess its catalogue.
+    #
+    # Whether a given id answers depends on the provider connections configured in the
+    # OmniRoute dashboard (Providers → …). Before connecting OpenCode, most `oc/*-free`
+    # ids returned "401 … is not supported"; once the OpenCode Free provider is connected
+    # they work. That is OmniRoute's business, not something to hardcode here.
+    #
+    # Set a comma-separated list to restrict the picker, e.g.
+    #   HERMES_OMNIROUTE_MODEL_ALLOWLIST="oc/deepseek-v4-flash-free,oc/ling-3.0-flash-free"
+    _raw_allow = os.environ.get("HERMES_OMNIROUTE_MODEL_ALLOWLIST", "*").strip()
+    ALLOW_ALL = _raw_allow in ("", "*")
+    ALLOWLIST = [] if ALLOW_ALL else [m.strip() for m in _raw_allow.split(",") if m.strip()]
+
+    # Used only when the live fetch fails (OmniRoute still booting, unreachable…) so the
+    # picker is never empty. These two are verified to answer with no credentials at all.
+    FALLBACK_MODELS = list(ALLOWLIST) or [
+        "oc/deepseek-v4-flash-free",
+        "oc/ling-3.0-flash-free",
+    ]
+
+
+    def discover_models():
+        """Ask OmniRoute what it can actually serve, so the picker matches reality.
+
+        Retries because both StatefulSets start together and OmniRoute needs ~15-25s to
+        run migrations before it serves: a single attempt loses that race and silently
+        falls back to the static list. An auth failure is NOT retried — no amount of
+        waiting fixes a missing API key.
+        """
+        attempts = int(os.environ.get("HERMES_OMNIROUTE_DISCOVERY_ATTEMPTS", "10") or 10)
+        delay = float(os.environ.get("HERMES_OMNIROUTE_DISCOVERY_DELAY", "6") or 6)
+        last = None
+        for attempt in range(1, attempts + 1):
+            req = urllib.request.Request(BASE_URL.rstrip("/") + "/models")
+            if API_KEY:
+                req.add_header("Authorization", "Bearer " + API_KEY)
+            try:
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    payload = json.load(response)
+                break
+            except urllib.error.HTTPError as exc:
+                if exc.code in (401, 403):
+                    print(
+                        f"[init-hermes-config] discovery unauthorized ({exc.code}) — "
+                        "OMNIROUTE_CLIENT_API_KEY missing or stale; using fallback list",
+                        flush=True,
+                    )
+                    return []
+                last = exc
+            except Exception as exc:  # noqa: BLE001 - keep waiting for OmniRoute to boot
+                last = exc
+            if attempt < attempts:
+                print(
+                    f"[init-hermes-config] OmniRoute not ready yet ({last}); "
+                    f"retry {attempt}/{attempts - 1} in {delay:.0f}s",
+                    flush=True,
+                )
+                time.sleep(delay)
+        else:
+            print(f"[init-hermes-config] model discovery failed after {attempts} attempts ({last}); using fallback list", flush=True)
+            return []
+
+        ids = [m.get("id") for m in payload.get("data") or [] if isinstance(m, dict) and m.get("id")]
+        total = len(ids)
+        if not ALLOW_ALL:
+            # Trust the allowlist rather than intersecting it with the advertised set.
+            # OmniRoute's catalogue is dynamic (it shrank from 421 to 99 ids between two
+            # runs as provider health changed) and some ids answer perfectly while being
+            # absent from /v1/models — oc/ling-3.0-flash-free returns finish_reason=stop
+            # but is not always advertised. Intersecting would silently drop a working
+            # model, so we keep the allowlist and only note what wasn't advertised.
+            advertised = set(ids)
+            missing = [m for m in ALLOWLIST if m not in advertised]
+            if missing:
+                print(f"[init-hermes-config] allowlisted but not currently advertised (kept anyway): {', '.join(missing)}", flush=True)
+            ids = list(ALLOWLIST)
+        print(f"[init-hermes-config] discovered {total} model(s); offering {len(ids)}", flush=True)
+        return ids
+
+
+    models = discover_models() or FALLBACK_MODELS
+    if DEFAULT_MODEL not in models:
+        models.insert(0, DEFAULT_MODEL)
+
+    p = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    data = yaml.safe_load(p.read_text()) if p.exists() else {}
+    data = data or {}
+
+    # setdefault, not assignment: a model chosen in the dashboard survives a restart.
+    #
+    # Consequence worth knowing: on a PVC that already has a config.yaml, editing
+    # HERMES_DEFAULT_MODEL in the manifest does NOTHING — the stored value wins. Set
+    # HERMES_FORCE_DEFAULT_MODEL=true to make the manifest authoritative again (useful
+    # when the stored default turns out to be a model that cannot be served).
+    force_default = os.environ.get("HERMES_FORCE_DEFAULT_MODEL", "false").strip().lower() in ("1", "true", "yes")
+    model_config = data.setdefault("model", {})
+    if force_default:
+        previous = model_config.get("default")
+        model_config["default"] = DEFAULT_MODEL
+        if previous and previous != DEFAULT_MODEL:
+            print(f"[init-hermes-config] forced default model {previous} -> {DEFAULT_MODEL}", flush=True)
+    else:
+        model_config.setdefault("default", DEFAULT_MODEL)
+    model_config.setdefault("provider", PROVIDER_ID)
+    model_config.setdefault("base_url", BASE_URL)
+    model_config.setdefault("api_mode", API_MODE)
+    # Pinned deliberately: Hermes cannot probe a custom endpoint's context window and
+    # defaults low, which makes context compaction fire far too early.
+    model_config["context_length"] = CONTEXT_LENGTH
+
+    providers = data.setdefault("providers", {})
+    providers[PROVIDER_ID] = {
+        "name": "OmniRoute",
+        "base_url": BASE_URL,
+        "api_key": API_KEY,
+        "default_model": DEFAULT_MODEL,
+        "transport": API_MODE,
+        "models": {m: {"context_length": CONTEXT_LENGTH} for m in models},
+    }
+
+    data.setdefault("tools", {}).setdefault("tool_search", {})["enabled"] = False
+
+    # Cost/looping guardrails — same posture as the other deployments in this repo.
+    agent_cfg = data.setdefault("agent", {})
+    agent_cfg["max_turns"] = int(os.environ.get("HERMES_MAX_TURNS", "60") or 60)
+    data.setdefault("tool_loop_guardrails", {})["hard_stop_enabled"] = True
+    data.setdefault("compression", {})["threshold"] = 0.85
+
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+    print(f"[init-hermes-config] provider={PROVIDER_ID} default_model={DEFAULT_MODEL} models={len(models)}", flush=True)
+    PY

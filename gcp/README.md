@@ -41,6 +41,28 @@ gcloud config set project <YOUR_REAL_PROJECT_ID>
 
 ## 🚀 Deploy
 
+### ⚡ One command (recommended)
+
+[`gcp-infra.sh`](gcp-infra.sh) runs every step below in order — APIs, VPC, subnet, both firewall rules,
+the cluster, and `get-credentials` — then verifies Workload Identity and prints the nodes:
+
+```bash
+./gcp-infra.sh --project <YOUR_REAL_PROJECT_ID>
+
+./gcp-infra.sh --dry-run --project <id>   # print the exact gcloud commands, change nothing
+./gcp-infra.sh --help                     # all flags
+```
+
+It is **idempotent** — each step checks whether the resource exists first, so a re-run after a partial
+failure continues instead of erroring out. Every value is overridable
+(`--zone`, `--machine-type`, `--num-nodes`, `--master-networks`, …), and it warns if your node count ×
+machine type would exceed the ~8 vCPU sandbox quota.
+
+> 🔒 The default `--master-networks 0.0.0.0/0` is sandbox convenience. For anything real, pass your own
+> CIDR: `./gcp-infra.sh --project <id> --master-networks "$(curl -s ifconfig.me)/32"`.
+
+The manual steps below are what the script automates — useful for understanding or cherry-picking.
+
 ### 1. Set Variables
 
 ```bash

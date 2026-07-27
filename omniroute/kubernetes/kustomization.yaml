@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Self-contained deploy root: `kubectl apply -k .` renders and applies the stack.
+# `secrets/secret.template.yaml` is intentionally NOT a resource here — it holds
+# `${...}` placeholders and must be rendered with envsubst first (see its header).
+namespace: omniroute
+
+resources:
+  - namespace.yaml
+  # ── OmniRoute: the multi-provider gateway ──────────────────────────────────
+  - workloads/service.yaml
+  - workloads/statefulset.yaml
+  - workloads/ingressroute.yaml
+  # ── Hermes: the agent, using OmniRoute as its model backend ────────────────
+  - configmaps/configmap-hermes-config.yaml
+  - workloads/hermes-service.yaml
+  - workloads/hermes-statefulset.yaml
+  - workloads/hermes-ingressroute.yaml
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/part-of: omniroute
+      app.kubernetes.io/managed-by: kustomize
