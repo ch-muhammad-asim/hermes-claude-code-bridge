@@ -236,6 +236,64 @@ kubectl -n omniroute exec hermes-0 -c hermes -- \
 #   omniroute health: 200
 ```
 
+## 🔑 Dashboard password: the Secret is the source of truth
+
+OmniRoute bcrypt-hashes `INITIAL_PASSWORD` into its SQLite database on **first boot only**
+(`[AUTH] Migrated INITIAL_PASSWORD to bcrypt hash during startup`). After that the *database*
+wins — so on a PVC that already has a database, rotating the Secret has **no effect** and the
+dashboard rejects the login with **"Invalid password"** even though `env | grep INITIAL_PASSWORD`
+inside the pod shows exactly what you typed. The tell is the PVC being older than the pod.
+
+The bundled reset tool doesn't help either — it imports `bcryptjs`, which isn't shipped in the
+image:
+
+```bash
+kubectl -n omniroute exec omniroute-0 -- node /app/bin/reset-password.mjs --password-stdin
+#   Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'bcryptjs'
+```
+
+So this deployment adds a **`reset-password-from-env` init container** that clears the stored hash
+before the server starts, making bootstrap re-seed from the env on **every** boot:
+
+```text
+[reset-password] cleared stored hash — will re-seed from INITIAL_PASSWORD
+[AUTH] Migrated INITIAL_PASSWORD to bcrypt hash during startup
+```
+
+Rotating the password is then just a Secret patch — verified working end-to-end
+(`POST /api/auth/login` → **200** with the new value):
+
+```bash
+kubectl -n omniroute patch secret omniroute-secrets --type merge \
+  -p '{"stringData":{"INITIAL_PASSWORD":"<new password>"}}'
+kubectl -n omniroute rollout restart statefulset/omniroute
+
+# confirm both lines appear
+kubectl -n omniroute logs omniroute-0 -c reset-password-from-env
+kubectl -n omniroute logs omniroute-0 -c omniroute | grep INITIAL_PASSWORD
+```
+
+> ⚖️ **Trade-off.** Because the env wins on every boot, a password changed in the dashboard UI is
+> reverted on the next restart. To keep UI changes instead, set `OMNIROUTE_PASSWORD_FROM_ENV=false`
+> on the init container — it then logs
+> `[reset-password] disabled — leaving the stored password alone` and never touches the database.
+
+<details>
+<summary>Manual one-off reset (no restart), if you'd rather not use the init container</summary>
+
+```bash
+kubectl -n omniroute exec omniroute-0 -c omniroute -- node -e '
+const {DatabaseSync} = require("node:sqlite");
+const db = new DatabaseSync("/app/data/storage.sqlite");
+db.prepare("DELETE FROM key_value WHERE namespace=? AND key=?").run("settings","password");
+console.log("cleared");'
+kubectl -n omniroute delete pod omniroute-0     # re-seeds from INITIAL_PASSWORD
+```
+
+The hash lives in `key_value` under namespace `settings`, key `password`.
+
+</details>
+
 ## 🔐 Security posture
 
 | Control | Setting | Why |
@@ -383,5 +441,6 @@ kubectl get pv                                        # expect no omniroute-boun
 | Pod killed during startup | Probes pointed at the wrong path, or `startupProbe` too tight. Keep `/api/monitoring/health`. |
 | PVC `Pending` | No default StorageClass — set `storageClassName` in `volumeClaimTemplates`. |
 | `/v1/*` returns 401 | Expected: `REQUIRE_API_KEY=true`. Create a key in the dashboard and send `Authorization: Bearer <key>`. |
-| Dashboard login rejected | `INITIAL_PASSWORD` seeds only the **first** boot against an empty database. |
+| Dashboard login rejected / **"Invalid password"** though the env is correct | The DB hash from an earlier boot wins over the Secret. The `reset-password-from-env` init container fixes this — check `kubectl -n omniroute logs omniroute-0 -c reset-password-from-env`. See [Dashboard password](#-dashboard-password-the-secret-is-the-source-of-truth). Tell-tale: PVC older than the pod. |
+| `reset-password.mjs` → `Cannot find package 'bcryptjs'` | Upstream packaging gap — that dev-only dep isn't in the image. Use the init container / manual SQLite reset instead. |
 | OAuth callback hits the wrong host | `BASE_URL` / `NEXT_PUBLIC_BASE_URL` must equal your public origin. |

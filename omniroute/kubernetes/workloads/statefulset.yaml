@@ -41,6 +41,63 @@ spec:
         runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+        # Make INITIAL_PASSWORD authoritative on EVERY boot, not just the first.
+        #
+        # OmniRoute bcrypt-hashes INITIAL_PASSWORD into its SQLite DB on first boot
+        # ("[AUTH] Migrated INITIAL_PASSWORD to bcrypt hash during startup") and from
+        # then on the DB wins — so rotating the Secret has NO effect and login fails
+        # with "Invalid password" while the env var looks perfectly correct. The
+        # bundled `bin/reset-password.mjs` can't help either: it imports `bcryptjs`,
+        # which isn't shipped in this image (ERR_MODULE_NOT_FOUND).
+        #
+        # Clearing the stored hash before start makes bootstrap re-seed from the env,
+        # so the Secret is the single source of truth — the GitOps behaviour you want.
+        #
+        # Trade-off: a password changed in the dashboard UI is reverted on the next
+        # restart. Set OMNIROUTE_PASSWORD_FROM_ENV=false below to keep UI changes.
+        - name: reset-password-from-env
+          image: diegosouzapw/omniroute:3.8.48
+          imagePullPolicy: IfNotPresent
+          command: ["node", "-e"]
+          args:
+            - |
+              const fs = require("node:fs");
+              if (process.env.OMNIROUTE_PASSWORD_FROM_ENV === "false") {
+                console.log("[reset-password] disabled — leaving the stored password alone");
+                process.exit(0);
+              }
+              if (!process.env.INITIAL_PASSWORD) {
+                console.log("[reset-password] INITIAL_PASSWORD is empty — nothing to enforce");
+                process.exit(0);
+              }
+              const db = "/app/data/storage.sqlite";
+              if (!fs.existsSync(db)) {
+                console.log("[reset-password] no database yet — first boot will seed from env");
+                process.exit(0);
+              }
+              const { DatabaseSync } = require("node:sqlite");
+              const h = new DatabaseSync(db);
+              // key_value('settings','password') holds the bcrypt hash. Deleting it makes
+              // the server re-seed from INITIAL_PASSWORD on this start.
+              const row = h.prepare("SELECT count(*) c FROM key_value WHERE namespace=? AND key=?").get("settings", "password");
+              if (row && row.c > 0) {
+                h.prepare("DELETE FROM key_value WHERE namespace=? AND key=?").run("settings", "password");
+                console.log("[reset-password] cleared stored hash — will re-seed from INITIAL_PASSWORD");
+              } else {
+                console.log("[reset-password] no stored password — nothing to clear");
+              }
+              h.close();
+          env:
+            # "false" keeps a dashboard-changed password across restarts.
+            - name: OMNIROUTE_PASSWORD_FROM_ENV
+              value: "true"
+          envFrom:
+            - secretRef:
+                name: omniroute-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
       containers:
         - name: omniroute
           # Pinned digest-style tag — `latest` is mutable and not reproducible.
