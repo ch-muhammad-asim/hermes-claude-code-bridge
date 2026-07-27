@@ -20,13 +20,13 @@ kubernetes/
 │   ├── secret.template.yaml           # OmniRoute secrets — render with envsubst, never apply raw
 │   ├── hermes-secret.template.yaml    # Hermes secrets (incl. the OmniRoute client key)
 │   └── README.md
+├── traefik/                           # chart-pinned Traefik v3 install (values + runbook)
 ├── workloads/
 │   ├── statefulset.yaml               # OmniRoute: replicas 1 + PVC (SQLite is single-writer)
-│   ├── service.yaml                   # OmniRoute ClusterIP :20128
-│   ├── ingressroute.yaml              # OmniRoute Traefik TLS route
+│   ├── service.yaml                   # OmniRoute ClusterIP :20128 — NOT exposed
 │   ├── hermes-statefulset.yaml        # Hermes agent + PVC
 │   ├── hermes-service.yaml            # Hermes ClusterIP :8642 (API) / :9119 (dashboard)
-│   └── hermes-ingressroute.yaml       # Hermes Traefik TLS route
+│   └── hermes-ingressroute.yaml       # Hermes TLS route — the ONLY public surface
 └── optional/                          # opt-in extras, NOT in kustomization.yaml
     ├── redis.yaml                     # shared rate-limit cache
     └── networkpolicy.yaml             # restrict :20128 to the Hermes pod + ingress
@@ -99,22 +99,31 @@ Narrow it only if you want to:
 
 - A cluster and `kubectl` context (any distribution — verified on v1.34).
 - A default **StorageClass** for the `ReadWriteOnce` PVC (GKE: `standard-rwo`).
-- **Traefik v3 CRDs** installed, if you want the `IngressRoute`. The chart-pinned install in this repo
-  is at [`../../kubernetes/traefik/`](../../kubernetes/traefik). Without the CRDs the apply fails with
-  `no matches for kind "IngressRoute"` — either install them or drop that line from
-  `kustomization.yaml` and expose the Service yourself.
+- **Traefik v3** for the Hermes route — install it from [`traefik/`](traefik) (chart-pinned 41.0.2,
+  Traefik v3.7.6) *before* `apply -k .`, or the apply fails with
+  `no matches for kind "IngressRoute"`. Already running the repo's other Traefik install
+  ([`../../kubernetes/traefik/`](../../kubernetes/traefik))? The values are identical and the same
+  controller serves this route — don't install twice. To skip ingress entirely, drop
+  `workloads/hermes-ingressroute.yaml` from `kustomization.yaml` and port-forward Hermes as well.
 
 ## 🚀 Deploy
 
-**1 — Set your hostnames.** Two routes, two hosts:
+**1 — Hostname.** One public route only: **`hermes.saqlainmushtaq.com`** in
+[`workloads/hermes-ingressroute.yaml`](workloads/hermes-ingressroute.yaml) — change it to your own
+domain. Install the ingress controller from [`traefik/`](traefik) first (chart-pinned v41.0.2).
 
-| File | Replace | Serves |
-|---|---|---|
-| `workloads/ingressroute.yaml` | `omniroute.example.com` | OmniRoute — providers, routing, quotas |
-| `workloads/hermes-ingressroute.yaml` | `hermes.example.com` | Hermes — agent chat, sessions, skills |
+**OmniRoute is not exposed.** It has no IngressRoute: it holds every provider credential and its
+`/v1` proxy would let anyone who reached it spend your quota, so it stays ClusterIP-only and is
+unreachable from the internet regardless of `REQUIRE_API_KEY`. Reach its dashboard on demand:
 
-Also update `BASE_URL` / `NEXT_PUBLIC_BASE_URL` in `workloads/statefulset.yaml` to the OmniRoute host —
-they must match the public origin or provider OAuth callbacks redirect to the wrong place.
+```bash
+kubectl -n omniroute port-forward svc/omniroute 20128:20128
+# then open http://localhost:20128
+```
+
+Because of that, `BASE_URL` / `NEXT_PUBLIC_BASE_URL` in `workloads/statefulset.yaml` stay on
+`http://localhost:20128` — they must match the origin **you** use in the browser, which is the
+port-forward. Only change them if you later publish OmniRoute behind its own hostname.
 
 **2 — Create both Secrets.** Easiest path — the script generates every value (including the scrypt
 dashboard hash), **prints a "SAVE THIS" block with the two dashboard passwords**, and applies both
@@ -361,7 +370,9 @@ kubectl get pv                                        # expect no omniroute-boun
 
 | Symptom | Cause / fix |
 |---|---|
-| `no matches for kind "IngressRoute"` | Traefik CRDs missing — install [`../../kubernetes/traefik/`](../../kubernetes/traefik) or remove that resource. |
+| `no matches for kind "IngressRoute"` | Traefik CRDs missing — install [`traefik/`](traefik) (CRDs step) before `apply -k .`, or drop that resource. |
+| Hermes route 404s from Traefik | IngressClass mismatch. The route sets `ingressClassName: traefik-external`; confirm your controller watches that class. |
+| Need the OmniRoute dashboard | By design it has no public route: `kubectl -n omniroute port-forward svc/omniroute 20128:20128`. |
 | `no matches for kind "Kustomization"` | You used `-f kustomization.yaml`. Kustomize needs `-k` on the **directory**: `kubectl apply -k .` (and `must build at directory` means you passed `-k` a file). |
 | **Hermes** `CrashLoopBackOff` with `preinit: fatal: /run belongs to uid 0 instead of 10000` | Something forced the pod non-root. The Hermes image is s6-overlay based: it **must** start as root to fix `/run`, then drops to uid 10000 itself. Use `fsGroup: 10000` **only** — no `runAsUser` / `runAsNonRoot` — and don't `drop: ["ALL"]` (that strips the `SETUID`/`SETGID` s6 needs). Both are already correct in `hermes-statefulset.yaml`. |
 | Hermes model calls fail `401 … is not supported` | OmniRoute has no provider **connection** yet. Add **Providers → OpenCode Go** in the OmniRoute dashboard. |

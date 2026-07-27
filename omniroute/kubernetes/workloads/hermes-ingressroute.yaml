@@ -1,8 +1,17 @@
-# Traefik v3 IngressRoute for the Hermes dashboard + API.
+# Traefik v3 IngressRoute — Hermes only.
 #
-# Separate host from OmniRoute's route so the two UIs stay distinct:
-#   omniroute.example.com → OmniRoute (providers, routing, quotas)
-#   hermes.example.com    → Hermes    (agent chat, sessions, skills)
+# OmniRoute is deliberately NOT exposed through ingress. It is the model gateway,
+# reachable in-cluster at omniroute:20128, and its dashboard is reached on demand
+# with a port-forward:
+#
+#   kubectl -n omniroute port-forward svc/omniroute 20128:20128
+#   open http://localhost:20128
+#
+# That keeps the only public surface the Hermes agent itself, and means the
+# OmniRoute proxy API is never internet-reachable regardless of REQUIRE_API_KEY.
+#
+# Requires the Traefik CRDs + a controller watching `traefik-external` — install
+# from ../traefik/ (chart-pinned).
 apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
@@ -12,24 +21,27 @@ metadata:
     app.kubernetes.io/component: dashboard
     app.kubernetes.io/part-of: omniroute
 spec:
+  # Declared in spec, not via a kubernetes.io/ingress.class annotation: an
+  # annotation naming a class no Traefik instance watches is silently ignored and
+  # the route never goes live.
   ingressClassName: traefik-external
   entryPoints:
     - websecure
   tls: {}
   routes:
-    # Hermes' API server and dashboard listen on different ports, so the /v1 API
-    # path is routed explicitly ahead of the catch-all dashboard rule.
-    - match: Host(`hermes.example.com`) && PathPrefix(`/v1`)
+    # Hermes serves its API (:8642) and dashboard (:9119) on different ports, so
+    # the API paths are matched explicitly ahead of the catch-all dashboard rule.
+    - match: Host(`hermes.saqlainmushtaq.com`) && PathPrefix(`/v1`)
       kind: Rule
       services:
         - name: hermes
           port: 8642
-    - match: Host(`hermes.example.com`) && PathPrefix(`/health`)
+    - match: Host(`hermes.saqlainmushtaq.com`) && PathPrefix(`/health`)
       kind: Rule
       services:
         - name: hermes
           port: 8642
-    - match: Host(`hermes.example.com`)
+    - match: Host(`hermes.saqlainmushtaq.com`)
       kind: Rule
       services:
         - name: hermes

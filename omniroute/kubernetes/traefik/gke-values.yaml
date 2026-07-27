@@ -1,0 +1,152 @@
+# Traefik Helm values for GCP GKE — ingress for the Hermes + OmniRoute stack.
+# Chart: traefik/traefik v41.0.2 (Traefik v3.7.6) — keep in sync with CHART_VERSION
+# in ./README.md.
+#
+# Only Hermes is routed (hermes.saqlainmushtaq.com). OmniRoute has no IngressRoute
+# by design — it stays a ClusterIP service reached via port-forward.
+#
+# Identical to ../../../kubernetes/traefik/gke-values.yaml so a single Traefik
+# install can serve every deployment in this repo: same `traefik-external`
+# IngressClass, same entry points, same LoadBalancer annotations. If you already
+# ran that one, you do NOT need a second install — skip to "Deploy the route".
+
+deployment:
+  kind: Deployment
+  replicas: 1
+  podAnnotations:
+    prometheus.io/port: "9100"
+    prometheus.io/scrape: "true"
+  podLabels:
+    gke: traefik
+
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik-external
+
+ingressRoute:
+  dashboard:
+    enabled: false
+
+api:
+  dashboard: true
+  insecure: false
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+
+accessLog:
+  enabled: true
+  format: json
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: drop
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: false
+    addServicesLabels: false
+
+providers:
+  kubernetesCRD:
+    enabled: true
+    ingressClass: traefik-external
+    allowExternalNameServices: true
+    allowEmptyServices: true
+  kubernetesIngress:
+    enabled: true
+    ingressClass: traefik-external
+    allowExternalNameServices: true
+    allowEmptyServices: true
+    publishedService:
+      enabled: true
+      pathOverride: traefik/traefik
+
+ports:
+  traefik:
+    port: 8080
+    expose:
+      default: false
+    exposedPort: 8080
+  metrics:
+    port: 9100
+    expose:
+      default: false
+    exposedPort: 9100
+  web:
+    port: 8000
+    expose:
+      default: true
+    exposedPort: 80
+    protocol: TCP
+    http:
+      redirections:
+        entryPoint:
+          to: websecure
+          scheme: https
+          permanent: true
+  websecure:
+    port: 8443
+    expose:
+      default: true
+    exposedPort: 443
+    protocol: TCP
+    http:
+      tls:
+        enabled: true
+    forwardedHeaders:
+      trustedIPs:
+        - 103.21.244.0/22
+        - 103.22.200.0/22
+        - 103.31.4.0/22
+        - 104.16.0.0/13
+        - 104.24.0.0/14
+        - 108.162.192.0/18
+        - 131.0.72.0/22
+        - 141.101.64.0/18
+        - 162.158.0.0/15
+        - 172.64.0.0/13
+        - 173.245.48.0/20
+        - 188.114.96.0/20
+        - 190.93.240.0/20
+        - 197.234.240.0/22
+        - 198.41.128.0/17
+        - 2400:cb00::/32
+        - 2606:4700::/32
+        - 2803:f800::/32
+        - 2405:b500::/32
+        - 2405:8100::/32
+        - 2a06:98c0::/29
+        - 2c0f:f248::/32
+
+service:
+  enabled: true
+  annotations:
+    cloud.google.com/neg: '{"ingress":true}'
+    networking.gke.io/load-balancer-type: External
+  spec:
+    type: LoadBalancer
+
+rbac:
+  enabled: true
+
+resources:
+  limits:
+    cpu: "500m"
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+nodeSelector:
+  cloud.google.com/gke-container-runtime: containerd
+
+additionalArguments:
+  - --ping
+  - --serversTransport.insecureSkipVerify=true

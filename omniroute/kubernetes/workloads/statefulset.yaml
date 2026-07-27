@@ -76,14 +76,20 @@ spec:
             # hermes-secrets Secret.
             - name: REQUIRE_API_KEY
               value: "false"
-            # Serving over TLS via the IngressRoute, so secure cookies are valid.
+            # "false" because OmniRoute is NOT behind the TLS ingress — it is reached
+            # over a plain-HTTP port-forward, and secure cookies are dropped on HTTP,
+            # which would silently break dashboard login. Set "true" only if you
+            # publish OmniRoute behind its own HTTPS hostname.
             - name: AUTH_COOKIE_SECURE
-              value: "true"
-            # Must match the public origin or provider OAuth callbacks redirect wrong.
+              value: "false"
+            # Must match the origin you actually open in the browser, or provider OAuth
+            # callbacks redirect to the wrong host. OmniRoute is intentionally not
+            # exposed via ingress, so that origin is the port-forward:
+            #   kubectl -n omniroute port-forward svc/omniroute 20128:20128
             - name: BASE_URL
-              value: https://omniroute.example.com
+              value: http://localhost:20128
             - name: NEXT_PUBLIC_BASE_URL
-              value: https://omniroute.example.com
+              value: http://localhost:20128
           envFrom:
             # JWT_SECRET, API_KEY_SECRET, INITIAL_PASSWORD (+ optional
             # STORAGE_ENCRYPTION_KEY / OMNIROUTE_WS_BRIDGE_SECRET / REDIS_URL).

@@ -8,15 +8,16 @@ namespace: omniroute
 
 resources:
   - namespace.yaml
-  # ── OmniRoute: the multi-provider gateway ──────────────────────────────────
+  # ── OmniRoute: the multi-provider gateway (ClusterIP only — NOT exposed) ────
+  # No IngressRoute on purpose: reach its dashboard with a port-forward instead.
+  #   kubectl -n omniroute port-forward svc/omniroute 20128:20128
   - workloads/service.yaml
   - workloads/statefulset.yaml
-  - workloads/ingressroute.yaml
   # ── Hermes: the agent, using OmniRoute as its model backend ────────────────
   - configmaps/configmap-hermes-config.yaml
   - workloads/hermes-service.yaml
   - workloads/hermes-statefulset.yaml
-  - workloads/hermes-ingressroute.yaml
+  - workloads/hermes-ingressroute.yaml   # the only public surface
 
 labels:
   - includeSelectors: false
