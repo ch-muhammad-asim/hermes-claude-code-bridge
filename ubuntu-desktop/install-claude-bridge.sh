@@ -22,7 +22,7 @@
 #   BRIDGE_PORT  (default 18181; legacy PROXY_PORT also accepted)
 #   CLAUDE_BIN   (default $HOME/.local/bin/claude)
 #   BRIDGE_CWD   (default $HOME; legacy PROXY_CWD also accepted)
-#   MODEL_ID     (default claude-opus-4-8-proxy; Hermes-safe alias)
+#   MODEL_ID     (default claude-opus-5-proxy; Hermes-safe alias)
 #   BRIDGE_MODELS (default all supported Claude models; comma-separated)
 #   BRIDGE_USER  (default current user; legacy PROXY_USER also accepted)
 #
@@ -41,14 +41,14 @@ SERVICE_NAME="claude-code-bridge.service"
 SERVICE_FILE="/etc/systemd/system/$SERVICE_NAME"
 PROVIDER_NAME="claude-code-bridge"
 # MODEL_ID is the id Hermes sees/advertises. It must NOT exactly match a name
-# in Hermes' built-in provider catalog (e.g. "claude-opus-4-8") or Hermes
+# in Hermes' built-in provider catalog (e.g. "claude-opus-5") or Hermes
 # auto-switches provider=custom -> anthropic and bypasses this bridge. The
 # "-proxy" suffix is retained for compatibility and keeps it off the catalog.
 # CLI_MODEL is the real model the bridge runs on the CLI (decoupled, since
 # pass-model is off).
-MODEL_ID="${MODEL_ID:-claude-opus-4-8-proxy}"
-CLI_MODEL="${CLI_MODEL:-claude-opus-4-8}"
-DEFAULT_MODEL_IDS="claude-fable-5,claude-opus-4-8,claude-opus-4-7,claude-opus-4-6,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5"
+MODEL_ID="${MODEL_ID:-claude-opus-5-proxy}"
+CLI_MODEL="${CLI_MODEL:-claude-opus-5}"
+DEFAULT_MODEL_IDS="claude-opus-5,claude-opus-4-8,claude-opus-4-7,claude-opus-4-6,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5"
 MODEL_IDS="${BRIDGE_MODELS:-${CLAUDE_CODE_BRIDGE_MODELS:-${MODEL_IDS:-$DEFAULT_MODEL_IDS}}}"
 
 # Resolve the real user even when invoked via sudo
@@ -147,9 +147,9 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_CLAUDE_BIN = os.path.expanduser("~/.local/bin/claude")
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5"
 DEFAULT_MODELS = [
-    "claude-fable-5",
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",

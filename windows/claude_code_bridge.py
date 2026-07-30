@@ -71,7 +71,6 @@ DEFAULT_MODEL = "claude-opus-4-8"
 # CLAUDE_CODE_BRIDGE_MODELS (comma-separated). The configured --model is always
 # merged in so the default is never missing from the list.
 DEFAULT_MODELS = [
-    "claude-fable-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",

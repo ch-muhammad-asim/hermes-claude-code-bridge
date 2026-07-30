@@ -237,7 +237,7 @@ Expected output ends with: ✅
 ✔ Got from Claude: claude-code-bridge ok
 Claude Code bridge installed.
   Endpoint:     http://127.0.0.1:18181/v1
-  Model ID:     claude-opus-4-8-proxy
+  Model ID:     claude-opus-5-proxy
   Service:      claude-code-bridge.service (active)
 ```
 
@@ -249,13 +249,13 @@ In Hermes' **"Local / custom endpoint"** setup screen:
 |---|---|
 | 🌐 Endpoint URL | `http://127.0.0.1:18181/v1` |
 | 🔑 API key | *(leave empty)* — bridge ignores it unless started with `--api-key` |
-| 🧠 Model | `claude-opus-4-8-proxy` |
+| 🧠 Model | `claude-opus-5-proxy` |
 
 Click **Connect**. The installer also writes this into `~/.hermes/config.yaml` automatically:
 
 ```yaml
 model:
-  default: claude-opus-4-8-proxy
+  default: claude-opus-5-proxy
   provider: custom
   base_url: http://127.0.0.1:18181/v1
   api_key: ''
@@ -269,8 +269,8 @@ model:
 | `BRIDGE_PORT` | Listen port | `18181` |
 | `CLAUDE_BIN` | Path to the `claude` CLI | `$HOME/.local/bin/claude` |
 | `BRIDGE_CWD` | Working dir for the bridge | `$HOME` |
-| `MODEL_ID` | Hermes-safe model alias the bridge advertises | `claude-opus-4-8-proxy` |
-| `CLI_MODEL` | Real Claude model executed by the CLI | `claude-opus-4-8` |
+| `MODEL_ID` | Hermes-safe model alias the bridge advertises | `claude-opus-5-proxy` |
+| `CLI_MODEL` | Real Claude model executed by the CLI | `claude-opus-5` |
 | `BRIDGE_USER` | User the service runs as | `$SUDO_USER` or current user |
 | `ALLOWED_TOOLS` | Comma-separated Claude Code tool allowlist | `*` |
 | `DISALLOWED_TOOLS` | Comma-separated denylist | empty |
@@ -380,7 +380,7 @@ curl -s http://127.0.0.1:18181/v1/models | python3 -m json.tool
 # Actual round-trip
 curl -s -X POST http://127.0.0.1:18181/v1/chat/completions \
   -H 'content-type: application/json' \
-  -d '{"model":"claude-opus-4-8-proxy","messages":[{"role":"user","content":"say hi"}]}' \
+  -d '{"model":"claude-opus-5-proxy","messages":[{"role":"user","content":"say hi"}]}' \
   | python3 -m json.tool
 ```
 

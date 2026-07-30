@@ -250,7 +250,7 @@ Set variables in the shell or a `.env` file next to the script.
 | `GATEWAY_ALLOW_ALL_USERS` | enabled by script | Enables local Web UI/gateway access for this developer-only stack. |
 | `CLAUDE_CODE_PROXY_MODEL` | `claude-opus-4-8` | Default model when a request omits `model`. |
 | `CLAUDE_CODE_PASS_MODEL` | `true` | Honor any Claude model ID the client requests (not limited to one model). Set `false` to pin the default. |
-| `CLAUDE_CODE_MODELS` | `claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5` | Models advertised on `/v1/models` (the picker catalogue). Not a whitelist. |
+| `CLAUDE_CODE_MODELS` | `claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5` | Models advertised on `/v1/models` (the picker catalogue). Not a whitelist. |
 | `CLAUDE_CODE_EFFORT` | `max` | Claude Code effort (`low`/`medium`/`high`/`max`). |
 | `CLAUDE_CODE_PERMISSION_MODE` | `dontAsk` | Do not prompt interactively for ungranted tools. |
 | `CLAUDE_CODE_MAX_BUDGET_USD` | `1.00` | Empty string disables the proxy budget flag. |

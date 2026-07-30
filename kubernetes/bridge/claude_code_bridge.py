@@ -56,7 +56,7 @@ CLAUDE_CODE_MODELS = [
     m.strip()
     for m in os.getenv(
         "CLAUDE_CODE_MODELS",
-        "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5",
+        "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5",
     ).split(",")
     if m.strip()
 ]

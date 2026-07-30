@@ -54,7 +54,7 @@ data:
   CLAUDE_CODE_PROXY_MODEL: claude-opus-4-8
   # Models advertised on /v1/models (the dashboard model picker). Not a whitelist:
   # with CLAUDE_CODE_PASS_MODEL=true, any valid Claude model ID a client requests is honored.
-  CLAUDE_CODE_MODELS: "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5"
+  CLAUDE_CODE_MODELS: "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5"
   CLAUDE_CODE_EFFORT: medium
   CLAUDE_CODE_PERMISSION_MODE: dontAsk
   CLAUDE_CODE_MAX_BUDGET_USD: "3.00"

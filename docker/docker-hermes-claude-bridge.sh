@@ -69,7 +69,7 @@
 #   CLAUDE_CODE_VERSION       default: latest              (npm @anthropic-ai/claude-code version; pin e.g. 2.1.167 to freeze)
 #   CLAUDE_CODE_PROXY_MODEL   default: claude-opus-4-8     (default when a request omits "model")
 #   CLAUDE_CODE_PASS_MODEL    default: true                (honor any Claude model ID the client requests)
-#   CLAUDE_CODE_MODELS        default: claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5 (advertised on /v1/models)
+#   CLAUDE_CODE_MODELS        default: claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5 (advertised on /v1/models)
 #   CLAUDE_CODE_EFFORT        default: max
 #   CLAUDE_CODE_PERMISSION_MODE default: dontAsk
 #   CLAUDE_CODE_MAX_BUDGET_USD  default: 1.00              (empty string disables the budget flag)
@@ -934,7 +934,7 @@ CLAUDE_CODE_MODELS = [
     m.strip()
     for m in os.getenv(
         "CLAUDE_CODE_MODELS",
-        "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5,claude-fable-5",
+        "claude-opus-4-8,claude-sonnet-5,claude-haiku-4-5",
     ).split(",")
     if m.strip()
 ]
