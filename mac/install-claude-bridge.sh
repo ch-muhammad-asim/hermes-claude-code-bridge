@@ -15,7 +15,7 @@
 #   ./install-claude-bridge.sh              # full install + start the service
 #   ./install-claude-bridge.sh --no-service # install deps only, don't register the service
 #
-# Endpoint after install: http://127.0.0.1:18181/v1  (model: claude-opus-4-8)
+# Endpoint after install: http://127.0.0.1:18181/v1  (model: claude-opus-5)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +66,7 @@ else
   "$SCRIPT_DIR/run-bridge.sh" install-service
 fi
 
-ok "Done. Endpoint: http://127.0.0.1:18181/v1  (model: claude-opus-4-8)"
+ok "Done. Endpoint: http://127.0.0.1:18181/v1  (model: claude-opus-5)"
 echo
 echo "Next steps:"
 echo "  ./run-bridge.sh test             # health check + a live completion"
