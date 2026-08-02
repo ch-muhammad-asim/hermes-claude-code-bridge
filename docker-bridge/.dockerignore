@@ -1,0 +1,4 @@
+*
+!claude_code_bridge.py
+!docker-entrypoint.sh
+!healthcheck.sh

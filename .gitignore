@@ -47,6 +47,9 @@ kubeconfig
 !env.example
 
 # Logs & runtime
+*.lock
+.*.lock
+.*.pid
 *.log
 proxy-sessions.json
 .claude-code-bridge.log

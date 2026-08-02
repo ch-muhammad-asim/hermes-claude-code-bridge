@@ -1,0 +1,121 @@
+# ──────────────────────────────────────────────────────────────────────────────
+#  Claude Code → OpenAI-compatible bridge, in Docker.
+#
+#  One service. It wraps your authenticated `claude` CLI and serves
+#  /v1/chat/completions + /v1/models on :18181, so anything that speaks the
+#  OpenAI API can use Claude Code as its backend.
+#
+#    ./generate-secrets.sh          # creates .env
+#    docker compose up -d --build   # imports your existing host login; no re-login
+#
+#  Default model is Opus 5 (claude-opus-5). Fable 5 (claude-fable-5) is advertised
+#  as an OPTIONAL alternative — clients pick it per request:
+#    curl … -d '{"model":"claude-fable-5","messages":[…]}'
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  claude-code-bridge:
+    build:
+      context: .
+      args:
+        # Pin e.g. 2.1.220 for a fully reproducible image.
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-latest}
+        NODE_BASE: ${NODE_BASE:-node:22-bookworm-slim}
+    image: claude-code-bridge:local
+    container_name: claude-code-bridge
+    hostname: claude-code-bridge
+    restart: unless-stopped
+    # No `init: true` — the image's ENTRYPOINT already runs tini as PID 1, so
+    # Compose's init would only stack a second one underneath it.
+    ports:
+      # Loopback-bound on purpose: this drives your authenticated Claude Code
+      # session, so it must not be reachable from the network.
+      - "${PROXY_BIND:-127.0.0.1}:${PROXY_PORT:-18181}:18181"
+    environment:
+      PROXY_HOST: 0.0.0.0
+      PROXY_PORT: "18181"
+      # Where the bind-mounted host Claude directory lands.
+      HOME: /hosthome
+      # Extra read roots handed to Claude Code via --add-dir. Without this the agent
+      # refuses to Read anything outside its cwd, so image paths fail even when the
+      # file is mounted.
+      CLAUDE_CODE_ADDITIONAL_DIRS: ${CLAUDE_CODE_ADDITIONAL_DIRS-${HOST_IMAGE_CACHE:-${HOME:-${USERPROFILE}}/.hermes/image_cache},${HOST_COMPOSER_IMAGES:-${HOME}/Library/Application Support/Hermes/composer-images}}
+      # ── Models ──────────────────────────────────────────────────────────────
+      # Default when a request omits "model".
+      CLAUDE_CODE_PROXY_MODEL: ${CLAUDE_CODE_PROXY_MODEL:-claude-opus-5}
+      # Advertised on GET /v1/models. Opus 5 first = the default; Fable 5 is the
+      # optional alternative.
+      CLAUDE_CODE_MODELS: ${CLAUDE_CODE_MODELS:-claude-opus-5,claude-fable-5,claude-opus-4-8,claude-opus-4-7,claude-opus-4-6,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5,claude-haiku-4-5-20251001}
+      # Honour the client's requested model instead of forcing the default —
+      # this is what makes selecting Fable 5 per request work.
+      CLAUDE_CODE_PASS_MODEL: ${CLAUDE_CODE_PASS_MODEL:-true}
+      CLAUDE_CODE_EFFORT: ${CLAUDE_CODE_EFFORT:-high}
+      # ── Guardrails ──────────────────────────────────────────────────────────
+      CLAUDE_CODE_PERMISSION_MODE: ${CLAUDE_CODE_PERMISSION_MODE:-dontAsk}
+      CLAUDE_CODE_MAX_BUDGET_USD: ${CLAUDE_CODE_MAX_BUDGET_USD:-5.00}
+      # `-` not `:-`: an explicitly empty value (all tools enabled) must pass through
+      # unchanged. `:-` would substitute the default and re-deny them.
+      CLAUDE_CODE_DISALLOWED_TOOLS: ${CLAUDE_CODE_DISALLOWED_TOOLS-Bash,Edit,Write,NotebookEdit}
+      CLAUDE_CODE_ALLOWED_TOOLS: ${CLAUDE_CODE_ALLOWED_TOOLS:-}
+      # ── Claude Code authentication ──────────────────────────────────────────
+      # Optional, and NOT the default. Use it only for CI or a host with no Claude
+      # login; otherwise the bind-mounted host credentials are simpler. Note this
+      # changes nothing about tools: claude.ai connectors are unavailable either way,
+      # because `claude -p` activates no MCP servers. See README, "Tool calling".
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN-}
+      # Bearer token clients must present. The entrypoint refuses to start when this
+      # is empty unless PROXY_ALLOW_ANONYMOUS=true, so a key missing by accident is a
+      # hard failure rather than a silently open bridge.
+      CLAUDE_CODE_PROXY_API_KEY: ${CLAUDE_CODE_PROXY_API_KEY:-}
+      # Set true ONLY to deliberately serve without authentication (e.g. to open
+      # /v1/models in a browser, which cannot send an Authorization header).
+      PROXY_ALLOW_ANONYMOUS: ${PROXY_ALLOW_ANONYMOUS:-false}
+      # Corporate proxy pass-through (harmless when unset).
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-}
+    volumes:
+      # BIND MOUNT, not a named volume: the container uses your REAL Claude Code
+      # directory, so it shares the host's credentials, settings and — critically —
+      # host's settings and skills. NOTE: claude.ai connectors (Slack, Drive,
+      # Atlassian) are listed by `claude mcp list` but are NOT usable — `claude -p`
+      # loads no MCP tools at all, on host or container alike. See README.
+      #
+      # Read-write on purpose: the CLI refreshes its own token in place, and that
+      # refresh must persist. Nothing here is destroyed by `docker compose down -v`.
+      - ${HOST_CLAUDE_DIR:-${HOME:-${USERPROFILE}}/.claude}:/hosthome/.claude
+      - ${HOST_CLAUDE_JSON:-${HOME:-${USERPROFILE}}/.claude.json}:/hosthome/.claude.json
+      # Image cache, mounted at the SAME absolute path inside the container. Clients
+      # such as Hermes pass a host path (".../image_cache/x.png") in the prompt and
+      # expect the agent to Read it; that only resolves if the path is identical on
+      # both sides. Read-only — the agent never needs to write here.
+      - ${HOST_IMAGE_CACHE:-${HOME:-${USERPROFILE}}/.hermes/image_cache}:${HOST_IMAGE_CACHE:-${HOME:-${USERPROFILE}}/.hermes/image_cache}:ro
+      # Hermes desktop writes pasted screenshots here. Long syntax because the path
+      # contains spaces ("Application Support"), which the short "src:dst:ro" form
+      # cannot express reliably.
+      - type: bind
+        source: ${HOST_COMPOSER_IMAGES:-${HOME}/Library/Application Support/Hermes/composer-images}
+        target: ${HOST_COMPOSER_IMAGES:-${HOME}/Library/Application Support/Hermes/composer-images}
+        read_only: true
+        bind:
+          create_host_path: true
+      - workspace:/workspace
+    tmpfs:
+      - /tmp:size=256m,exec
+    # Must match the OWNER of the bind-mounted ~/.claude, or the CLI cannot read or
+    # refresh its credentials. generate-secrets.sh fills these from `id -u` / `id -g`.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: ${MEMORY:-2g}
+    cpus: ${CPUS:-1}
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  workspace:

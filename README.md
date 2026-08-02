@@ -63,11 +63,14 @@ credentials and the DNS record to set. Prefer to do it by hand? Pick a target be
 | 🍎 | **macOS** | Local dev on a Mac (no Docker); powers the Hermes desktop app | [`mac/`](./mac) |
 | 🪟 | **Windows 10/11** | Local dev on a Windows laptop (no Docker/WSL) | [`windows/`](./windows) |
 | 🐧 | **Ubuntu Desktop** | Local dev / a dedicated Linux box | [`ubuntu-desktop/`](./ubuntu-desktop) |
-| 🐳 | **Docker** | Reproducible container on any host | [`docker/`](./docker) |
+| 🐳 | **Docker (Compose)** | Two-service Compose stack — bridge + Hermes, **Opus 5** default with **Fable 5** optional; runs anywhere Docker does | [`docker-bridge/`](./docker-bridge) |
+| 🐳 | **Docker (script)** | Scripted runtime with host-mode proxy and lifecycle subcommands (needs `flock`) | [`docker/`](./docker) |
 | ☸️ | **Kubernetes (GKE)** | Production: Hermes gateway + bridge sidecar, TLS, autoscaling | [`kubernetes/`](./kubernetes) |
 | 🧩 | **The bridge itself** | Cross-platform launcher + the Python bridge | [`claude-bridge-with-hermes/`](./claude-bridge-with-hermes) |
 
-Every deployment exposes the same endpoint: **`http://<host>:18181/v1`** (model `claude-opus-4-8`).
+Every deployment exposes the same endpoint: **`http://<host>:18181/v1`**. Default model is
+`claude-opus-4-8`, except [`docker-bridge/`](./docker-bridge) which defaults to **`claude-opus-5`** and
+also advertises **`claude-fable-5`** as an optional pick.
 
 **Same protocol, different agent CLI:**
 
@@ -108,19 +111,129 @@ This is built the way production infrastructure should be — **least privilege,
 ## ⚡ 60-second local try (Docker)
 
 ```bash
-# Runs the stdlib-only bridge against your authenticated `claude`
-cd docker
-./docker-hermes-claude-bridge.sh
+# OpenAI-compatible bridge as a Compose stack (macOS, Linux, Windows)
+cd docker-bridge
+./generate-secrets.sh --all-tools --allow-anonymous && docker compose up -d --build
 # → OpenAI-compatible endpoint on http://127.0.0.1:18181/v1
 ```
 
-Then:
+No login step: the container bind-mounts your existing `$HOME/.claude`, so it shares your host
+session. Drop the flags for the secure default (bearer token required, read-only tools).
+
+> claude.ai connectors (Slack, Drive, Atlassian) are **not** usable through the bridge: `claude -p`
+> loads no MCP tools, on any host. See [docker-bridge/README.md](docker-bridge/README.md#claudeai-connectors--visible-but-not-usable-through-the-bridge).
+
+Then (default model is Opus 5; omit `"model"` to use it):
 
 ```bash
+source docker-bridge/.env
 curl -s http://127.0.0.1:18181/v1/chat/completions \
+  -H "Authorization: Bearer $CLAUDE_CODE_PROXY_API_KEY" \
   -H 'content-type: application/json' \
-  -d '{"model":"claude-opus-4-8","messages":[{"role":"user","content":"hello"}]}'
+  -d '{"messages":[{"role":"user","content":"hello"}]}'
+
+# …or opt into Fable 5 for one request
+curl -s http://127.0.0.1:18181/v1/chat/completions \
+  -H "Authorization: Bearer $CLAUDE_CODE_PROXY_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"model":"claude-fable-5","messages":[{"role":"user","content":"hello"}]}'
 ```
+
+> The `../docker/` script needs `flock(1)`, so it's Linux-only in practice — use `docker-bridge/`
+> on macOS.
+
+---
+
+## 🩺 Hermes desktop troubleshooting
+
+### "UPDATE DIDN'T FINISH — Hermes is still running"
+
+The message is misleading: it appears with **no Hermes window open and, often, no update process at
+all**. The updater writes a sentinel at `$HOME/.hermes/.hermes-update-in-progress` holding the PID
+that claimed the update, and **it does not verify that the PID is still alive**. Any update that
+dies, is killed, or wedges therefore blocks every later attempt permanently:
+
+```
+✗ Another Hermes update is already running (PID 38134, started 29s ago).
+```
+
+Clicking **Retry update** cannot help — Retry is the thing being blocked.
+
+**1. Confirm the sentinel is stale.** If the PID it names has no process, the lock is a leftover:
+
+```bash
+cat "$HOME/.hermes/.hermes-update-in-progress"          # first line is the PID
+ps ax -o pid,stat,etime,%cpu,command | grep -iE 'hermes-setup|Hermes\.app' | grep -v grep
+```
+
+A *wedged* (rather than dead) updater shows `0.0` CPU with no children — also safe to clear.
+
+**2. Clear it.**
+
+```bash
+pkill -f 'hermes-setup --update'
+rm -f "$HOME/.hermes/.hermes-update-in-progress"
+```
+
+**3. Run the update.** Either click **Retry update**, or drive it directly — on Apple Silicon:
+
+```bash
+"$HOME/.hermes/hermes-setup" --update --branch main \
+  --target-app "$HOME/.hermes/hermes-agent/apps/desktop/release/mac-arm64/Hermes.app"
+```
+
+Substitute `mac-x64` on Intel, or point `--target-app` at wherever `Hermes.app` lives.
+
+**4. Confirm it finished.** It takes ~3-4 minutes (npm install plus a Vite build) and is silent on
+stdout — all progress goes to the log. All three stages must report `Succeeded`:
+
+```bash
+grep -E 'state=Succeeded|state=Failed' "$HOME/.hermes/logs/bootstrap-installer.log" | tail -4
+```
+
+```
+update  stage=update  state=Succeeded  duration_ms=Some(204963)
+update  stage=rebuild state=Succeeded  duration_ms=Some(1843)
+update  stage=install state=Succeeded  duration_ms=Some(2)
+```
+
+To watch it while it runs:
+
+```bash
+tail -f "$HOME/.hermes/logs/bootstrap-installer.log"
+```
+
+> Do not match on the bare string `hermes` when hunting for processes. Any path containing it —
+> including this repository's own bridges, e.g. `hermes-claude-code-bridge/opencode/…` — will match
+> and send you after the wrong process. Match `Hermes.app` or `hermes-setup`.
+
+### Hermes relaunches a helper you thought you stopped
+
+On macOS these are `launchd` jobs with `KeepAlive = true`, so `kill` is undone within seconds. Unload
+the job rather than killing the process:
+
+```bash
+launchctl list | grep -i hermes
+launchctl bootout  "gui/$(id -u)/<label>"
+launchctl disable  "gui/$(id -u)/<label>"
+mkdir -p "$HOME/Library/LaunchAgents/disabled"
+mv "$HOME/Library/LaunchAgents/<label>.plist" "$HOME/Library/LaunchAgents/disabled/"
+```
+
+To restore it later:
+
+```bash
+mv "$HOME/Library/LaunchAgents/disabled/<label>.plist" "$HOME/Library/LaunchAgents/"
+launchctl enable    "gui/$(id -u)/<label>"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/<label>.plist"
+```
+
+### Hermes shows `HTTP 502: Not logged in · Please run /login`
+
+That is the **bridge**, not Hermes — the container's Claude Code session is unauthenticated. On
+macOS the usual cause is a stale `$HOME/.claude/.credentials.json`; re-running
+`./generate-secrets.sh` rewrites it from the keychain. Then `docker compose up -d`. See
+[`docker-bridge/README.md`](docker-bridge/README.md#reusing-your-host-login).
 
 ---
 
