@@ -38,6 +38,10 @@ API_KEY="${CLAUDE_CODE_BRIDGE_API_KEY:-}"
 BRIDGE_CWD="${CLAUDE_CODE_BRIDGE_CWD:-${CLAUDE_CODE_PROXY_CWD:-$HOME}}"
 MAX_CONCURRENCY="${CLAUDE_CODE_BRIDGE_MAX_CONCURRENCY:-4}"
 QUEUE_WAIT="${CLAUDE_CODE_BRIDGE_QUEUE_WAIT:-30}"
+# Wall-clock cap on a single turn. Long infra work (GKE cluster builds, terraform
+# applies) routinely exceeds the 240s python default, which surfaces to the caller
+# as "claude command timed out" (504).
+TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-1800}"
 BRIDGE_PY="$SCRIPT_DIR/claude_code_bridge.py"
 LOG_FILE="${CLAUDE_CODE_BRIDGE_LOG:-$HOME/.claude-code-bridge.log}"
 LABEL="com.hermes.claude-code-bridge"   # launchd label / systemd unit stem
@@ -53,7 +57,7 @@ resolve_claude() { if [ -n "${CLAUDE_BIN:-}" ]; then printf '%s' "$CLAUDE_BIN"; 
 # Absolute paths so the service unit has no PATH ambiguity. (bash-3.2 safe.)
 ARGV=()
 build_argv() {
-  ARGV=( "$PY" "$BRIDGE_PY" --host "$BRIDGE_HOST" --port "$BRIDGE_PORT" --model "$MODEL" --cwd "$BRIDGE_CWD" --max-concurrency "$MAX_CONCURRENCY" --queue-wait "$QUEUE_WAIT" )
+  ARGV=( "$PY" "$BRIDGE_PY" --host "$BRIDGE_HOST" --port "$BRIDGE_PORT" --model "$MODEL" --cwd "$BRIDGE_CWD" --max-concurrency "$MAX_CONCURRENCY" --queue-wait "$QUEUE_WAIT" --timeout "$TIMEOUT" )
   local claude_bin; claude_bin="$(resolve_claude)"
   if [ -n "$claude_bin" ]; then ARGV+=( --claude-bin "$claude_bin" ); fi
   if [ -n "$API_KEY" ];    then ARGV+=( --api-key "$API_KEY" ); fi
@@ -68,6 +72,7 @@ print_config() {
   echo "  claude:         ${claude_bin:-not found}"
   echo "  max concurrency:${MAX_CONCURRENCY}"
   echo "  queue wait:     ${QUEUE_WAIT}s"
+  echo "  turn timeout:   ${TIMEOUT}s"
   echo "  api key:        $([ -n "$API_KEY" ] && echo required || echo not required)"
   echo "  tools:          allowed=${CLAUDE_CODE_ALLOWED_TOOLS:-*} disallowed=${CLAUDE_CODE_DISALLOWED_TOOLS:-(empty)} permission_mode=${CLAUDE_CODE_PERMISSION_MODE:-bypassPermissions}"
 }
