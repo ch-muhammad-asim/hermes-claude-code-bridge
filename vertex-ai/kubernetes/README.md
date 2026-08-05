@@ -215,7 +215,7 @@ Create the bridge API key secret:
 
 ```bash
 export VERTEX_GEMINI_BRIDGE_API_KEY="$(openssl rand -hex 32)"
-export HERMES_IMAGE='nousresearch/hermes-agent:v2026.7.20'
+export HERMES_IMAGE='nousresearch/hermes-agent:v2026.8.3'
 export HERMES_DASHBOARD_PASSWORD="<value-from-approved-production-secret-manager>"
 
 export HERMES_DASHBOARD_PASSWORD_HASH="$(
@@ -270,7 +270,7 @@ update that script's Python block to match.
 
 ```bash
 cd vertex-ai/kubernetes
-OLD=v2026.7.20; NEW=<new-dated-tag>
+OLD=v2026.8.3; NEW=<new-dated-tag>
 sed -i '' "s#nousresearch/hermes-agent:${OLD}#nousresearch/hermes-agent:${NEW}#g" workloads/statefulset.yaml
 grep -n 'nousresearch/hermes-agent:' workloads/statefulset.yaml   # expect exactly 3 matching lines
 ```
@@ -472,7 +472,7 @@ export HERMES_DASHBOARD_PASSWORD="$(openssl rand -hex 16)"
 # avoids needing a local Docker daemon; --rm -it can time out on the first pull,
 # so create, poll, then read the log.
 kubectl -n "$NAMESPACE" run hashgen --restart=Never \
-  --image=nousresearch/hermes-agent:v2026.7.20 \
+  --image=nousresearch/hermes-agent:v2026.8.3 \
   --env="HERMES_DASHBOARD_PASSWORD=$HERMES_DASHBOARD_PASSWORD" \
   --env="PYTHONPATH=/opt/hermes" \
   --command -- /opt/hermes/.venv/bin/python -c \
