@@ -428,7 +428,7 @@ what it patches out and why.
 
 ```bash
 export PATH=/opt/homebrew/bin:$PATH
-export PROJECT_ID="gcp-ai-sandb-403-d3947399"     # your sandbox project
+export PROJECT_ID="$(gcloud config get-value project)"   # your sandbox project
 export ZONE="us-central1-a"                       # zonal on purpose (sandbox vCPU cap)
 export CLUSTER_NAME="gke-cluster"
 export NAMESPACE="devops-agent"
@@ -499,7 +499,11 @@ kubectl -n "$NAMESPACE" create secret generic hermes-agent-github-app \
   --dry-run=client -o yaml | kubectl apply -f - && rm -f /tmp/gh.pem
 
 # ── 7. Deploy ────────────────────────────────────────────────────────────────
-kubectl apply -k ../overlays/sandbox
+# The ServiceAccount annotation carries __PROJECT_NUMBER__ so the manifests stay
+# project-agnostic. Render, substitute, apply — never mutate the tracked files.
+kubectl kustomize ../overlays/sandbox \
+  | sed "s|__PROJECT_NUMBER__|${PROJECT_NUMBER}|g" \
+  | kubectl apply -f -
 kubectl -n "$NAMESPACE" rollout status statefulset/hermes-agent --timeout=600s
 ```
 
@@ -511,7 +515,7 @@ kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-gemini-bridge -- python3 -
 import urllib.request
 r=urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email',headers={'Metadata-Flavor':'Google'})
 print(urllib.request.urlopen(r,timeout=5).read().decode())"
-# -> 501960475871-compute@developer.gserviceaccount.com
+# -> <PROJECT_NUMBER>-compute@developer.gserviceaccount.com
 
 # b. The bridge resolved the project from that identity (no project id in the manifest)
 kubectl -n "$NAMESPACE" logs hermes-agent-0 -c vertex-gemini-bridge | grep listening
