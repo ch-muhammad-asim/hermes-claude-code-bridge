@@ -1,6 +1,6 @@
-# ☸️ Vertex AI Claude — Kubernetes Deployment
+# ☸️ Vertex AI Gemini — Kubernetes Deployment
 
-This directory is the **self-contained Kustomize root** for the production Hermes + Vertex Claude
+This directory is the **self-contained Kustomize root** for the production Hermes + Vertex Gemini
 deployment: `kubectl apply -k .` renders and applies the whole stack.
 
 Target production environment:
@@ -8,7 +8,7 @@ Target production environment:
 ```text
 GCP project: your-gcp-project-id
 Vertex location: global
-Claude model: claude-opus-4-8
+Gemini model: gemini-3.5-flash
 ```
 
 ## 🗂️ Directory layout
@@ -16,7 +16,7 @@ Claude model: claude-opus-4-8
 ```text
 kubernetes/
 ├── kustomization.yaml        # the Kustomize root — apply with `kubectl apply -k .`
-├── bridge/                   # vertex_claude_bridge.py + requirements (+ local-dev README)
+├── bridge/                   # vertex_gemini_bridge.py + requirements (+ local-dev README)
 ├── gcp-mcp/                  # loopback OAuth bridge for the read-only GCP MCP servers
 ├── github-cli/               # read-only `gh` wrapper (fresh App token per call)
 ├── identity/                 # SOUL.md — the agent's always-loaded identity
@@ -31,19 +31,19 @@ kubernetes/
 ```text
 Hermes Agent
   -> custom Hermes provider
-  -> vertex-claude-bridge
+  -> vertex-gemini-bridge
   -> Google Vertex AI Anthropic partner model endpoint
-  -> claude-opus-4-8
+  -> gemini-3.5-flash
 ```
 
-The bridge code lives in [`bridge/vertex_claude_bridge.py`](bridge/vertex_claude_bridge.py) — a
+The bridge code lives in [`bridge/vertex_gemini_bridge.py`](bridge/vertex_gemini_bridge.py) — a
 single copy inside this Kustomize root (no duplicate source tree, no load-restrictor overrides).
 
 Create the `devops-agent` namespace idempotently during the apply flow.
 
 ## ✅ Runtime Requirements
 
-- `claude-opus-4-8` is enabled in Vertex AI Model Garden for `your-gcp-project-id`.
+- `gemini-3.5-flash` is enabled in Vertex AI Model Garden for `your-gcp-project-id`.
 - The GKE cluster has **Workload Identity** enabled (`--workload-pool=<project>.svc.id.goog`) — the
   repo's `gcp/` provisioning does this.
 - The pod uses the Kubernetes `ServiceAccount` `hermes-agent` (`rbac/serviceaccount.yaml`), bound via
@@ -62,13 +62,11 @@ The bridge should run with:
 ```text
 ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id
 CLOUD_ML_REGION=global
-ANTHROPIC_MODEL=claude-opus-4-8
-VERTEX_CLAUDE_BRIDGE_API_KEY=<kubernetes-secret-value>
-VERTEX_CLAUDE_MAX_TOKENS=8192
-VERTEX_CLAUDE_TIMEOUT_SECONDS=300
-VERTEX_CLAUDE_PROMPT_CACHING=1
-VERTEX_CLAUDE_MAX_RETRIES=2
-VERTEX_CLAUDE_CACHE_TTL=1h
+GEMINI_MODEL=gemini-3.5-flash
+VERTEX_GEMINI_BRIDGE_API_KEY=<kubernetes-secret-value>
+VERTEX_GEMINI_MAX_TOKENS=8192
+VERTEX_GEMINI_TIMEOUT_SECONDS=300
+VERTEX_GEMINI_MAX_RETRIES=2
 ```
 
 These match the existing Vertex environment convention for production workloads.
@@ -79,17 +77,17 @@ Hermes should point to the bridge using a custom Hermes provider:
 
 ```yaml
 model:
-  default: claude-opus-4-8
-  provider: vertex-claude-bridge
+  default: gemini-3.5-flash
+  provider: vertex-gemini-bridge
   base_url: http://127.0.0.1:18182/v1
   api_mode: chat_completions
 
 providers:
-  vertex-claude-bridge:
-    name: Vertex Claude Bridge
+  vertex-gemini-bridge:
+    name: Vertex Gemini Bridge
     base_url: http://127.0.0.1:18182/v1
-    api_key: ${VERTEX_CLAUDE_BRIDGE_API_KEY}
-    default_model: claude-opus-4-8
+    api_key: ${VERTEX_GEMINI_BRIDGE_API_KEY}
+    default_model: gemini-3.5-flash
     transport: chat_completions
 
 tools:
@@ -122,7 +120,7 @@ envsubst < secrets/secret.template.yaml | kubectl apply -f -
 `kustomization.yaml` generates the runtime ConfigMaps from Git-owned files in this directory:
 
 ```text
-hermes-agent-vertex-bridge        -> bridge/vertex_claude_bridge.py + bridge/requirements.txt
+hermes-agent-vertex-bridge        -> bridge/vertex_gemini_bridge.py + bridge/requirements.txt
 hermes-agent-gcp-mcp-auth-bridge  -> gcp-mcp/gcp_mcp_auth_bridge.py
 hermes-agent-github-cli           -> github-cli/gh
 hermes-agent-runtime-identity     -> identity/SOUL.md
@@ -166,42 +164,57 @@ the GKE metadata server (requires Workload Identity on the cluster, which `gcp/`
 export PROJECT_ID="your-gcp-project-id"
 export NAMESPACE="devops-agent"
 export KSA_NAME="hermes-agent"
-export GSA_NAME="hermes-vertex"
-export GSA_EMAIL="${GSA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
+export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
 
-# 1. Google service account the pod acts as
-gcloud iam service-accounts create "$GSA_NAME" \
-  --project "$PROJECT_ID" \
-  --display-name "Hermes Vertex AI bridge (Workload Identity)"
+# Which GSA does the pod act as?
+#
+#   Outside a sandbox — a dedicated, least-privilege GSA (preferred):
+#     export GSA_EMAIL="hermes-vertex@${PROJECT_ID}.iam.gserviceaccount.com"
+#     gcloud iam service-accounts create hermes-vertex --project "$PROJECT_ID" \
+#       --display-name "Hermes Vertex AI bridge (Workload Identity)"
+#     gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+#       --member "serviceAccount:${GSA_EMAIL}" --role "roles/aiplatform.user"
+#
+#   Inside a Pluralsight/ACG sandbox — project-level setIamPolicy is DENIED, so a
+#   dedicated GSA can never be granted roles/aiplatform.user and its token 403s on
+#   aiplatform.endpoints.predict. Use the Compute Engine default SA, which already
+#   carries roles/editor (Vertex included). No role grant needed.
+export GSA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
 
-# 2. Vertex AI invocation (Claude on the Anthropic partner endpoint) — the only role it needs
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-  --member "serviceAccount:${GSA_EMAIL}" \
-  --role "roles/aiplatform.user"
-
-# 3. Allow the KSA to impersonate the GSA (the Workload Identity binding)
+# Bind the KSA -> GSA (this is SA-level IAM, permitted in the sandbox)
 gcloud iam service-accounts add-iam-policy-binding "$GSA_EMAIL" \
   --project "$PROJECT_ID" \
   --member "serviceAccount:${PROJECT_ID}.svc.id.goog[${NAMESPACE}/${KSA_NAME}]" \
   --role "roles/iam.workloadIdentityUser"
+
+# Annotate the KSA so GKE knows which GSA to mint tokens for
+kubectl -n "$NAMESPACE" annotate serviceaccount "$KSA_NAME" \
+  "iam.gke.io/gcp-service-account=${GSA_EMAIL}" --overwrite
 ```
 
-The KSA-side annotation (`iam.gke.io/gcp-service-account: hermes-vertex@…`) is already declared in
+**Order matters.** Run the binding *after* the Workload-Identity-enabled cluster exists. The
+`<project>.svc.id.goog` identity pool is created by GKE, not by IAM, so binding first fails with:
+
+```text
+INVALID_ARGUMENT: Identity Pool does not exist (<project>.svc.id.goog)
+```
+
+The KSA-side annotation (`iam.gke.io/gcp-service-account: …`) is already declared in
 `rbac/serviceaccount.yaml` and applied by the Kustomize flow below. Verify from the pod after deploy —
 ADC should resolve to the GSA via the metadata server:
 
 ```bash
-kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-claude-bridge -- \
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-gemini-bridge -- \
   python3 -c 'import google.auth; c, p = google.auth.default(); print("project:", p)'
-kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-claude-bridge -- \
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-gemini-bridge -- \
   python3 -c "import urllib.request; r = urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email', headers={'Metadata-Flavor': 'Google'}); print(urllib.request.urlopen(r, timeout=3).read().decode())"
-# expected: hermes-vertex@your-gcp-project-id.iam.gserviceaccount.com
+# expected: the $GSA_EMAIL bound above
 ```
 
 Create the bridge API key secret:
 
 ```bash
-export VERTEX_CLAUDE_BRIDGE_API_KEY="$(openssl rand -hex 32)"
+export VERTEX_GEMINI_BRIDGE_API_KEY="$(openssl rand -hex 32)"
 export HERMES_IMAGE='nousresearch/hermes-agent:v2026.7.20'
 export HERMES_DASHBOARD_PASSWORD="<value-from-approved-production-secret-manager>"
 
@@ -219,7 +232,7 @@ kubectl -n "$NAMESPACE" create secret generic hermes-agent-secrets \
   --from-literal=HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin \
   --from-literal=HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$HERMES_DASHBOARD_PASSWORD_HASH" \
   --from-literal=HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)" \
-  --from-literal=VERTEX_CLAUDE_BRIDGE_API_KEY="$VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  --from-literal=VERTEX_GEMINI_BRIDGE_API_KEY="$VERTEX_GEMINI_BRIDGE_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
@@ -236,7 +249,7 @@ kubectl -n "$NAMESPACE" get statefulset,pod,pvc,svc,ingressroute -o wide
 
 The Hermes runtime image is `nousresearch/hermes-agent`, pinned by tag in `workloads/statefulset.yaml`. It is
 referenced in **three** places that must stay in sync: the `init-runtime-tools` init container, the
-`init-hermes-config` init container, and the `hermes` container. (The `vertex-claude-bridge` and
+`init-hermes-config` init container, and the `hermes` container. (The `vertex-gemini-bridge` and
 `gcp-mcp-auth-bridge` sidecars run `python:3.13-slim` and are unaffected.)
 
 Always pin a dated `vYYYY.M.D` tag. Do **not** deploy `latest` or `main` — they are mutable and not
@@ -405,6 +418,151 @@ Username: admin
 Password: value stored in the approved production secret manager
 ```
 
+## 🧪 Sandbox runbook (verified end to end)
+
+Every command below was executed against a Pluralsight/ACG GCP sandbox and is reproduced verbatim.
+It deploys Hermes on GKE running **`gemini-3.5-flash` on Vertex AI**, authenticating with **Workload
+Identity only** — no service-account JSON key anywhere. Use
+`../overlays/sandbox` rather than this directory as the Kustomize root; see that overlay's header for
+what it patches out and why.
+
+```bash
+export PATH=/opt/homebrew/bin:$PATH
+export PROJECT_ID="gcp-ai-sandb-403-d3947399"     # your sandbox project
+export ZONE="us-central1-a"                       # zonal on purpose (sandbox vCPU cap)
+export CLUSTER_NAME="gke-cluster"
+export NAMESPACE="devops-agent"
+export KSA_NAME="hermes-agent"
+
+gcloud config set project "$PROJECT_ID"
+
+# ── 1. Vertex AI API ─────────────────────────────────────────────────────────
+gcloud services enable aiplatform.googleapis.com
+
+# ── 2. VPC + GKE cluster (Workload Identity + GKE_METADATA) ──────────────────
+# Long-running (~8 min). Background it so a session/turn timeout cannot kill it.
+cd ../../gcp
+nohup ./gcp-infra.sh --project "$PROJECT_ID" > /tmp/deploy.log 2>&1 &
+tail -f /tmp/deploy.log        # wait for "✔ Infrastructure ready"
+
+# ── 3. Confirm Workload Identity is actually on (both layers) ────────────────
+gcloud container clusters describe "$CLUSTER_NAME" --zone "$ZONE" \
+  --format='value(status,workloadIdentityConfig.workloadPool)'
+# -> RUNNING   <project>.svc.id.goog
+gcloud container node-pools describe default-pool --cluster "$CLUSTER_NAME" --zone "$ZONE" \
+  --format='value(config.workloadMetadataConfig.mode)'
+# -> GKE_METADATA   (a cluster-level pool with legacy GCE_METADATA nodes silently breaks WI)
+
+# ── 4. Namespace ─────────────────────────────────────────────────────────────
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+
+# ── 5. Bind KSA -> GSA (AFTER the cluster exists; see "Order matters" above) ──
+export PROJECT_NUMBER="$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')"
+export GSA_EMAIL="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+gcloud iam service-accounts add-iam-policy-binding "$GSA_EMAIL" \
+  --project "$PROJECT_ID" \
+  --member "serviceAccount:${PROJECT_ID}.svc.id.goog[${NAMESPACE}/${KSA_NAME}]" \
+  --role "roles/iam.workloadIdentityUser"
+
+# ── 6. Secrets ───────────────────────────────────────────────────────────────
+export VERTEX_GEMINI_BRIDGE_API_KEY="$(openssl rand -hex 32)"
+export HERMES_DASHBOARD_PASSWORD="$(openssl rand -hex 16)"
+
+# Hash the dashboard password with the exact Hermes image. Running it as a pod
+# avoids needing a local Docker daemon; --rm -it can time out on the first pull,
+# so create, poll, then read the log.
+kubectl -n "$NAMESPACE" run hashgen --restart=Never \
+  --image=nousresearch/hermes-agent:v2026.7.20 \
+  --env="HERMES_DASHBOARD_PASSWORD=$HERMES_DASHBOARD_PASSWORD" \
+  --env="PYTHONPATH=/opt/hermes" \
+  --command -- /opt/hermes/.venv/bin/python -c \
+  'import os; from plugins.dashboard_auth.basic import hash_password; print("HASH="+hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
+kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded pod/hashgen --timeout=300s
+export HERMES_DASHBOARD_PASSWORD_HASH="$(kubectl -n "$NAMESPACE" logs hashgen | sed -n 's/^HASH=//p')"
+kubectl -n "$NAMESPACE" delete pod hashgen
+
+kubectl -n "$NAMESPACE" create secret generic hermes-agent-secrets \
+  --from-literal=API_SERVER_KEY="$(openssl rand -hex 32)" \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$HERMES_DASHBOARD_PASSWORD_HASH" \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=VERTEX_GEMINI_BRIDGE_API_KEY="$VERTEX_GEMINI_BRIDGE_API_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# The hermes container mounts a GitHub App secret and reads its env vars at
+# startup. Supply real credentials to use `gh`; a placeholder is enough to boot
+# and does not affect the Vertex path.
+openssl genrsa -out /tmp/gh.pem 2048
+kubectl -n "$NAMESPACE" create secret generic hermes-agent-github-app \
+  --from-literal=app-id="000000" --from-literal=installation-id="000000" \
+  --from-file=private-key.pem=/tmp/gh.pem \
+  --dry-run=client -o yaml | kubectl apply -f - && rm -f /tmp/gh.pem
+
+# ── 7. Deploy ────────────────────────────────────────────────────────────────
+kubectl apply -k ../overlays/sandbox
+kubectl -n "$NAMESPACE" rollout status statefulset/hermes-agent --timeout=600s
+```
+
+### Verification
+
+```bash
+# a. Pod identity is the GSA, delivered keylessly by the GKE metadata server
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-gemini-bridge -- python3 -c "
+import urllib.request
+r=urllib.request.Request('http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/email',headers={'Metadata-Flavor':'Google'})
+print(urllib.request.urlopen(r,timeout=5).read().decode())"
+# -> 501960475871-compute@developer.gserviceaccount.com
+
+# b. The bridge resolved the project from that identity (no project id in the manifest)
+kubectl -n "$NAMESPACE" logs hermes-agent-0 -c vertex-gemini-bridge | grep listening
+# -> listening on 0.0.0.0:18182 project=<project> location=global model=gemini-3.5-flash auth=on
+
+# c. A real Vertex Gemini completion, through the sidecar
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c vertex-gemini-bridge -- python3 -c "
+import json,os,urllib.request
+body=json.dumps({'model':'gemini-3.5-flash','messages':[{'role':'user','content':'Reply with exactly: vertex gemini ok'}],'max_tokens':512}).encode()
+r=urllib.request.Request('http://127.0.0.1:18182/v1/chat/completions',data=body,
+  headers={'Authorization':'Bearer '+os.environ['VERTEX_GEMINI_BRIDGE_API_KEY'],'Content-Type':'application/json'})
+d=json.load(urllib.request.urlopen(r,timeout=120))
+print(d['model'], repr(d['choices'][0]['message']['content']))"
+# -> gemini-3.5-flash 'vertex gemini ok'
+
+# d. Hermes itself is pinned to the model
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c hermes -- sed -n '1,6p' /opt/data/config.yaml
+# -> model: {default: gemini-3.5-flash, provider: vertex-gemini-bridge, ...}
+
+# e. End-to-end: drive a real agent turn, then match its token counts against
+#    the bridge's Vertex usage line. Equal counts prove the turn went to Vertex.
+kubectl -n "$NAMESPACE" exec hermes-agent-0 -c hermes -- sh -lc '
+/opt/hermes/.venv/bin/python - <<PY
+import json,os,urllib.request
+body=json.dumps({"model":"hermes-agent","messages":[{"role":"user","content":"In one short sentence, name the Google model you are running on."}],"stream":False}).encode()
+r=urllib.request.Request("http://127.0.0.1:8642/v1/chat/completions",data=body,
+  headers={"Authorization":"Bearer "+os.environ["API_SERVER_KEY"],"Content-Type":"application/json"})
+d=json.load(urllib.request.urlopen(r,timeout=300))
+print(d["choices"][0]["message"]["content"]); print(d["usage"])
+PY'
+# -> "I am running on the Gemini 3.5 Flash model built by Google."
+# -> {'prompt_tokens': 13934, 'completion_tokens': 16, ...}
+kubectl -n "$NAMESPACE" logs hermes-agent-0 -c vertex-gemini-bridge | grep 'usage model=' | tail -1
+# -> usage model=google/gemini-3.5-flash input=13934 output=16 reasoning=459 total=14409
+
+# Dashboard / API (no Traefik in the sandbox)
+kubectl -n "$NAMESPACE" port-forward statefulset/hermes-agent 9119:9119 8642:8642
+```
+
+### Gotchas confirmed in this environment
+
+| Symptom | Cause / fix |
+| --- | --- |
+| `404 ... model not found or your project does not have access to it` on `gemini-3.5-flash` | Gemini 3.x resolves **only** at `location=global`. Regional endpoints (`us-central1`, …) 404. |
+| Intermittent 404s returning **HTML** instead of JSON, even for models that work | Vertex frontend throttling under rapid-fire probes — not a missing model. Space out requests before concluding anything. |
+| `INVALID_ARGUMENT: Identity Pool does not exist` | The KSA→GSA binding ran before the cluster existed. GKE creates the pool. |
+| Pod stuck `Pending`, `0/3 nodes are available: 3 Insufficient cpu` | An `e2-medium` has 2 vCPU capacity but only **940m allocatable**, and kube-system already requests 424–886m of it. The sandbox overlay lowers requests to 350m total. |
+| `roles/aiplatform.user` cannot be granted | Sandboxes deny `projects.setIamPolicy`, so a dedicated least-privilege GSA can never be authorized and its token 403s on `aiplatform.endpoints.predict`. The Compute Engine default SA already carries `roles/editor`. Outside a sandbox, always prefer the dedicated GSA. |
+| Hermes turn hangs with no output, bridge logs `POST … 200` | SSE served over HTTP/1.0 while advertising `connection: keep-alive` — the client waits for a content-length that never arrives. The bridge sends `connection: close`. Hermes streams by default, so this is the common path. |
+| `Connect call failed ('127.0.0.1', 19190)` MCP warnings | Expected in the sandbox overlay: the `gcp-mcp-auth-bridge` sidecar is patched out (it needs Google OAuth credentials). Non-fatal — the agent runs without those three read-only MCP servers. |
+
 ## 🧪 Validation
 
 Health check from inside the cluster:
@@ -413,8 +571,8 @@ Health check from inside the cluster:
 kubectl -n devops-agent run vertex-bridge-curl \
   --rm -it --restart=Never \
   --image=curlimages/curl:8.16.0 \
-  --env="VERTEX_CLAUDE_BRIDGE_API_KEY=$VERTEX_CLAUDE_BRIDGE_API_KEY" \
-  -- sh -lc 'curl -sS -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" http://hermes-agent:18182/health'
+  --env="VERTEX_GEMINI_BRIDGE_API_KEY=$VERTEX_GEMINI_BRIDGE_API_KEY" \
+  -- sh -lc 'curl -sS -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" http://hermes-agent:18182/health'
 ```
 
 Chat completion validation:
@@ -423,12 +581,12 @@ Chat completion validation:
 kubectl -n devops-agent run vertex-bridge-chat-test \
   --rm -it --restart=Never \
   --image=curlimages/curl:8.16.0 \
-  --env="VERTEX_CLAUDE_BRIDGE_API_KEY=$VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  --env="VERTEX_GEMINI_BRIDGE_API_KEY=$VERTEX_GEMINI_BRIDGE_API_KEY" \
   -- sh -lc 'curl -sS \
-    -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" \
+    -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" \
     -H "Content-Type: application/json" \
     http://hermes-agent:18182/v1/chat/completions \
-    -d "{\"model\":\"claude-opus-4-8\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: vertex opus ok\"}],\"stream\":false,\"max_tokens\":128}"'
+    -d "{\"model\":\"gemini-3.5-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: vertex gemini ok\"}],\"stream\":false,\"max_tokens\":128}"'
 ```
 
 Public endpoint validation:
@@ -440,7 +598,7 @@ curl -sS https://devops.saqlainmushtaq.com/health
 ## 🐚 Runtime Paths and Container Shells
 
 The Vertex deployment does **not** run Claude Code CLI. It uses a Python chat-completions-compatible bridge that sends
-requests to Vertex AI Claude, so `claude` is not expected to exist in the `vertex-claude-bridge` container.
+requests to Vertex AI Gemini, so `claude` is not expected to exist in the `vertex-gemini-bridge` container.
 If you open a shell in that container and run `claude`, `bash: claude: command not found` is correct.
 
 Use the right container and path for the operation:
@@ -448,7 +606,7 @@ Use the right container and path for the operation:
 | Container | Purpose | Important paths |
 | --- | --- | --- |
 | `hermes` | Hermes gateway, dashboard, Slack sessions, skills, MCP client runtime | Hermes CLI: `/opt/hermes/.venv/bin/hermes`; home/PVC: `/opt/data`; tools: `/opt/data/bin`; skills: `/opt/data/skills`; memory: `/opt/data/memory`; `kubectl`: `/usr/local/bin/kubectl` symlink to `/opt/data/bin/kubectl` |
-| `vertex-claude-bridge` | Python bridge from Hermes to Vertex AI Claude | bridge script: `/app/vertex_claude_bridge.py`; health port: `18182`; no `claude` binary |
+| `vertex-gemini-bridge` | Python bridge from Hermes to Vertex AI Gemini | bridge script: `/app/vertex_gemini_bridge.py`; health port: `18182`; no `claude` binary |
 | `gcp-mcp-auth-bridge` | Loopback OAuth bridge for Google MCP | GCP MCP proxy: `http://127.0.0.1:19190/{logging,monitoring,trace}` |
 
 Useful shell checks:
@@ -463,10 +621,10 @@ kubectl -n devops-agent exec statefulset/hermes-agent -c hermes -- \
   sh -lc 'command -v kubectl && kubectl version --client=true'
 
 # The Vertex bridge container is not a Claude Code shell.
-kubectl -n devops-agent exec statefulset/hermes-agent -c vertex-claude-bridge -- \
+kubectl -n devops-agent exec statefulset/hermes-agent -c vertex-gemini-bridge -- \
   sh -lc 'test ! -x "$(command -v claude 2>/dev/null)" && echo "claude CLI is not installed here; this is expected"'
-kubectl -n devops-agent exec statefulset/hermes-agent -c vertex-claude-bridge -- \
-  sh -lc 'test -f /app/vertex_claude_bridge.py && echo "Vertex bridge script present"'
+kubectl -n devops-agent exec statefulset/hermes-agent -c vertex-gemini-bridge -- \
+  sh -lc 'test -f /app/vertex_gemini_bridge.py && echo "Vertex bridge script present"'
 ```
 
 ## 🎭 Playwright MCP — headless browser for live-app diagnosis

@@ -9,6 +9,10 @@ configMapGenerator:
   - name: hermes-agent-vertex-bridge
     namespace: devops-agent
     files:
+      # Both bridges ship in the ConfigMap; the StatefulSet sidecar picks one.
+      # Gemini is the deployed default — swapping back to Claude on Vertex is a
+      # one-line change to the sidecar command, with no ConfigMap edit.
+      - vertex_gemini_bridge.py=bridge/vertex_gemini_bridge.py
       - vertex_claude_bridge.py=bridge/vertex_claude_bridge.py
       - requirements.txt=bridge/requirements.txt
   - name: hermes-agent-gcp-mcp-auth-bridge

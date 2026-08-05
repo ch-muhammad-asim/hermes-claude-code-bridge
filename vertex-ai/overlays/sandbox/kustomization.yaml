@@ -1,0 +1,87 @@
+# Sandbox overlay — Pluralsight / A Cloud Guru GCP sandbox.
+#
+# The base (../..) is the production deployment. Two pieces of it depend on
+# credentials and cluster add-ons that do not exist in a throwaway sandbox, so
+# they are patched out here rather than weakened in the base:
+#
+#   1. IngressRoute        — needs the Traefik CRDs (traefik.io/v1alpha1) and a
+#                            Traefik controller watching "traefik-external".
+#                            Neither is installed, and `kubectl apply` fails on
+#                            an unknown kind. Reach the dashboard/API with
+#                            `kubectl port-forward` instead.
+#   2. gcp-mcp-auth-bridge — refuses to start without GOOGLE_MCP_OAUTH_CLIENT_ID
+#                            / _SECRET / _REFRESH_TOKEN (it calls sys.exit(1)),
+#                            so with no OAuth app it would CrashLoopBackOff and
+#                            hold the pod out of Ready forever.
+#
+# Everything that matters for Vertex AI is unchanged: the hermes-agent KSA and
+# its Workload Identity annotation, the vertex-gemini-bridge sidecar, and the
+# gemini-3.5-flash model default.
+#
+#   kubectl apply -k vertex-ai/overlays/sandbox
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../kubernetes
+
+patches:
+  # No Traefik in the sandbox — drop the IngressRoute entirely.
+  - target:
+      group: traefik.io
+      version: v1alpha1
+      kind: IngressRoute
+      name: hermes-agent-dashboard
+    patch: |
+      $patch: delete
+      apiVersion: traefik.io/v1alpha1
+      kind: IngressRoute
+      metadata:
+        name: hermes-agent-dashboard
+        namespace: devops-agent
+
+  # Drop the GCP MCP token-proxy sidecar and the ConfigMap volume it mounts,
+  # and right-size CPU/memory requests for e2-medium sandbox nodes.
+  #
+  # Sizing: an e2-medium reports 2 vCPU of capacity but GKE reserves most of the
+  # second core — only 940m is allocatable, and kube-system already requests
+  # 424-886m of that per node. The production requests (500m + 250m = 750m) do
+  # not fit on any node, so the pod sits Pending with
+  # "0/3 nodes are available: 3 Insufficient cpu". These requests total 350m and
+  # schedule; limits stay generous so the agent can still burst.
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: hermes-agent
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: hermes-agent
+        namespace: devops-agent
+      spec:
+        template:
+          spec:
+            containers:
+              - name: gcp-mcp-auth-bridge
+                $patch: delete
+              - name: hermes
+                resources:
+                  requests:
+                    cpu: "250m"
+                    memory: "1Gi"
+                  limits:
+                    cpu: "1500m"
+                    memory: "2Gi"
+              - name: vertex-gemini-bridge
+                resources:
+                  requests:
+                    cpu: "100m"
+                    memory: "256Mi"
+                  limits:
+                    cpu: "500m"
+                    memory: "512Mi"
+            volumes:
+              - name: gcp-mcp-auth-bridge-files
+                $patch: delete

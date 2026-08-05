@@ -112,11 +112,11 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "-lc"]
           env:
-            - name: VERTEX_CLAUDE_BRIDGE_API_KEY
+            - name: VERTEX_GEMINI_BRIDGE_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: hermes-agent-secrets
-                  key: VERTEX_CLAUDE_BRIDGE_API_KEY
+                  key: VERTEX_GEMINI_BRIDGE_API_KEY
             - name: SLACK_HOME_CHANNEL
               value: C0123456789
             - name: SLACK_HOME_CHANNEL_NAME
@@ -205,8 +205,8 @@ spec:
               data = data or {}
 
               data["model"] = {
-                  "default": "claude-opus-4-8",
-                  "provider": "vertex-claude-bridge",
+                  "default": "gemini-3.5-flash",
+                  "provider": "vertex-gemini-bridge",
                   "base_url": "http://127.0.0.1:18182/v1",
                   "api_mode": "chat_completions",
                   # Pin the 1M window: Hermes can't probe context length from the custom
@@ -216,13 +216,17 @@ spec:
               }
 
               providers = data.setdefault("providers", {})
-              providers["vertex-claude-bridge"] = {
-                  "name": "Vertex Claude Bridge",
+              providers["vertex-gemini-bridge"] = {
+                  "name": "Vertex Gemini Bridge",
                   "base_url": "http://127.0.0.1:18182/v1",
-                  "api_key": os.environ["VERTEX_CLAUDE_BRIDGE_API_KEY"],
-                  "default_model": "claude-opus-4-8",
+                  "api_key": os.environ["VERTEX_GEMINI_BRIDGE_API_KEY"],
+                  "default_model": "gemini-3.5-flash",
                   "transport": "chat_completions",
               }
+              # Drop the Claude-on-Vertex provider if a previous deployment
+              # persisted it to the PVC's config.yaml, so the agent can't fall
+              # back to a bridge that is no longer running on :18182.
+              providers.pop("vertex-claude-bridge", None)
 
               slack_home_channel = os.environ.get("SLACK_HOME_CHANNEL", "").strip()
               if slack_home_channel:
@@ -391,11 +395,11 @@ spec:
             - name: dashboard
               containerPort: 9119
           env:
-            - name: VERTEX_CLAUDE_BRIDGE_API_KEY
+            - name: VERTEX_GEMINI_BRIDGE_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: hermes-agent-secrets
-                  key: VERTEX_CLAUDE_BRIDGE_API_KEY
+                  key: VERTEX_GEMINI_BRIDGE_API_KEY
             - name: GITHUB_APP_ID
               valueFrom:
                 secretKeyRef:
@@ -437,9 +441,9 @@ spec:
             - name: SLACK_HOME_CHANNEL_THREAD_ID
               value: ""
             - name: HERMES_TUI_PROVIDER
-              value: vertex-claude-bridge
+              value: vertex-gemini-bridge
             - name: HERMES_INFERENCE_PROVIDER
-              value: vertex-claude-bridge
+              value: vertex-gemini-bridge
           envFrom:
             - secretRef:
                 name: hermes-agent-secrets
@@ -517,35 +521,42 @@ spec:
               drop:
                 - NET_RAW
                 - NET_ADMIN
-        - name: vertex-claude-bridge
+        # Gemini on Vertex AI. Unlike the Claude sidecar (which translates
+        # OpenAI -> Anthropic Messages against publishers/anthropic), this one
+        # targets Vertex's OpenAI-compatible endpoint
+        # (endpoints/openapi/chat/completions), so it is a thin authenticating
+        # proxy: it injects a Workload Identity access token from ADC and
+        # forwards the request. No schema translation to drift out of sync.
+        - name: vertex-gemini-bridge
           image: python:3.13-slim
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-lc"]
           env:
-            - name: VERTEX_CLAUDE_BRIDGE_API_KEY
+            - name: VERTEX_GEMINI_BRIDGE_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: hermes-agent-secrets
-                  key: VERTEX_CLAUDE_BRIDGE_API_KEY
-            - name: ANTHROPIC_VERTEX_PROJECT_ID
-              value: your-gcp-project-id
+                  key: VERTEX_GEMINI_BRIDGE_API_KEY
+            # No GOOGLE_CLOUD_PROJECT here on purpose: google.auth.default()
+            # resolves the project from the GKE metadata server via Workload
+            # Identity, so the manifest carries no hardcoded project id. Set
+            # VERTEX_GEMINI_PROJECT_ID only to call a project other than the
+            # cluster's own.
+            #
+            # Gemini 3.x resolves ONLY at the multi-region "global" endpoint;
+            # regional locations (us-central1, ...) return 404 for these models.
             - name: CLOUD_ML_REGION
               value: global
-            - name: ANTHROPIC_MODEL
-              value: claude-opus-4-8
-            - name: VERTEX_CLAUDE_MAX_TOKENS
+            - name: GEMINI_MODEL
+              value: gemini-3.5-flash
+            - name: VERTEX_GEMINI_MAX_TOKENS
               value: "8192"
-            - name: VERTEX_CLAUDE_TIMEOUT_SECONDS
+            - name: VERTEX_GEMINI_TIMEOUT_SECONDS
               value: "300"
-            # Cost/reliability optimizations. Prompt caching caches the large, stable
-            # system+tools prefix (set to "0" to disable). Retries smooth transient
-            # Vertex 5xx/429 so they don't surface to the agent as 502s.
-            - name: VERTEX_CLAUDE_PROMPT_CACHING
-              value: "1"
-            - name: VERTEX_CLAUDE_MAX_RETRIES
+            # Retries smooth transient Vertex 5xx/429 so they don't surface to
+            # the agent as 502s.
+            - name: VERTEX_GEMINI_MAX_RETRIES
               value: "2"
-            - name: VERTEX_CLAUDE_CACHE_TTL
-              value: "1h"
           envFrom:
             - secretRef:
                 name: hermes-agent-secrets
@@ -553,7 +564,7 @@ spec:
             - |
               set -eu
               python3 -m pip install --no-cache-dir -r /app/requirements.txt
-              exec python3 /app/vertex_claude_bridge.py \
+              exec python3 /app/vertex_gemini_bridge.py \
                 --host 0.0.0.0 \
                 --port 18182
           ports:
@@ -561,8 +572,8 @@ spec:
               containerPort: 18182
           volumeMounts:
             - name: vertex-bridge-files
-              mountPath: /app/vertex_claude_bridge.py
-              subPath: vertex_claude_bridge.py
+              mountPath: /app/vertex_gemini_bridge.py
+              subPath: vertex_gemini_bridge.py
             - name: vertex-bridge-files
               mountPath: /app/requirements.txt
               subPath: requirements.txt
@@ -577,7 +588,7 @@ spec:
                   import urllib.request
 
                   req = urllib.request.Request("http://127.0.0.1:18182/health")
-                  req.add_header("Authorization", f"Bearer {os.environ['VERTEX_CLAUDE_BRIDGE_API_KEY']}")
+                  req.add_header("Authorization", f"Bearer {os.environ['VERTEX_GEMINI_BRIDGE_API_KEY']}")
                   with urllib.request.urlopen(req, timeout=3) as response:
                       raise SystemExit(0 if response.status == 200 else 1)
                   PY
