@@ -49,7 +49,7 @@ Point any OpenAI-compatible client at the local endpoint:
 
 ```powershell
 $body = @{
-  model    = "claude-opus-4-8"
+  model    = "claude-opus-5"
   messages = @(@{ role = "user"; content = "Say hello from Claude Code" })
 } | ConvertTo-Json
 
@@ -63,7 +63,7 @@ Python (OpenAI SDK):
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:18181/v1", api_key="not-needed")
 print(client.chat.completions.create(
-    model="claude-opus-4-8",
+    model="claude-opus-5",
     messages=[{"role": "user", "content": "Say hello from Claude Code"}],
 ).choices[0].message.content)
 ```
@@ -78,7 +78,7 @@ print(client.chat.completions.create(
 
 ```yaml
 model:
-  default: claude-opus-4-8
+  default: claude-opus-5
   provider: custom
   base_url: http://127.0.0.1:18181/v1
   key_env: OPENAI_API_KEY
@@ -90,7 +90,7 @@ The bridge ignores auth, but Hermes needs the env var named by `key_env` to exis
 Add-Content "$env:USERPROFILE\.hermes\.env" "OPENAI_API_KEY=not-needed"
 ```
 
-*(Or via the UI: Settings → **Providers** → add a **Custom / OpenAI-compatible** provider with Base URL `http://127.0.0.1:18181/v1` and any non-empty key, then Settings → **Model** → pick `claude-opus-4-8`.)*
+*(Or via the UI: Settings → **Providers** → add a **Custom / OpenAI-compatible** provider with Base URL `http://127.0.0.1:18181/v1` and any non-empty key, then Settings → **Model** → pick `claude-opus-5`.)*
 
 **2. Restart the gateway** and **verify** the full path:
 
@@ -126,7 +126,7 @@ Set these environment variables **before** installing the service (they're baked
 |----------|---------|-------------|
 | `BRIDGE_HOST` | `127.0.0.1` | Bind address (keep it loopback unless you know why) |
 | `BRIDGE_PORT` | `18181` | Listen port |
-| `CLAUDE_CODE_BRIDGE_MODEL` | `claude-opus-4-8` | Default model |
+| `CLAUDE_CODE_BRIDGE_MODEL` | `claude-opus-5` | Default model |
 | `CLAUDE_CODE_BRIDGE_API_KEY` | *(empty)* | If set, clients must send `Authorization: Bearer <key>` |
 | `CLAUDE_BIN` | *(auto)* | Explicit path to the `claude` binary |
 | `CLAUDE_CODE_BRIDGE_CWD` | `$HOME` | Working directory Claude Code runs in |

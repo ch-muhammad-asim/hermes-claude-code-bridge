@@ -15,7 +15,7 @@
 #   .\install-claude-bridge.ps1 -NoService   # install deps only, don't register the service
 #
 # After install, point any OpenAI-compatible client at:
-#   http://127.0.0.1:18181/v1   (model: claude-opus-4-8)
+#   http://127.0.0.1:18181/v1   (model: claude-opus-5)
 param([switch]$NoService)
 
 $ErrorActionPreference = "Stop"
@@ -74,7 +74,7 @@ if ($NoService) {
   & (Join-Path $ScriptDir "run-bridge.ps1") install-service
 }
 
-Ok "Done. Endpoint: http://127.0.0.1:18181/v1  (model: claude-opus-4-8)"
+Ok "Done. Endpoint: http://127.0.0.1:18181/v1  (model: claude-opus-5)"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Cyan
 Write-Host "  .\run-bridge.ps1 test            # health check + a live completion"

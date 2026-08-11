@@ -17,7 +17,7 @@
 #
 # Config via environment variables (baked into the task at install):
 #   BRIDGE_HOST (default 127.0.0.1)  BRIDGE_PORT (default 18181)
-#   CLAUDE_CODE_BRIDGE_MODEL (default claude-opus-4-8)
+#   CLAUDE_CODE_BRIDGE_MODEL (default claude-opus-5)
 #   CLAUDE_CODE_BRIDGE_API_KEY (empty -> unauthenticated)   CLAUDE_BIN (override claude path)
 param([string]$Command = "run")
 
@@ -38,7 +38,7 @@ $Py  = $Py.Source
 
 $BridgeHost = if ($env:BRIDGE_HOST) { $env:BRIDGE_HOST } else { "127.0.0.1" }
 $Port  = if ($env:BRIDGE_PORT) { $env:BRIDGE_PORT } else { "18181" }
-$Model = if ($env:CLAUDE_CODE_BRIDGE_MODEL) { $env:CLAUDE_CODE_BRIDGE_MODEL } else { "claude-opus-4-8" }
+$Model = if ($env:CLAUDE_CODE_BRIDGE_MODEL) { $env:CLAUDE_CODE_BRIDGE_MODEL } else { "claude-opus-5" }
 $ApiKey = $env:CLAUDE_CODE_BRIDGE_API_KEY
 
 function Bridge-Args {

@@ -64,13 +64,14 @@ def resolve_claude_bin(value: str) -> Optional[str]:
 
 
 DEFAULT_CLAUDE_BIN = default_claude_bin()
-DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_MODEL = "claude-opus-5"
 # The set of Claude model IDs the bridge advertises on ``/v1/models`` by default.
 # The bridge just forwards ``--model`` to the Claude Code CLI, so this is the
 # catalogue clients can pick from. Override per-deployment with --models /
 # CLAUDE_CODE_BRIDGE_MODELS (comma-separated). The configured --model is always
 # merged in so the default is never missing from the list.
 DEFAULT_MODELS = [
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",
