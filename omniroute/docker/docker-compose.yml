@@ -17,7 +17,7 @@
 services:
   omniroute:
     # Pinned on purpose: `latest` is mutable and not reproducible.
-    image: diegosouzapw/omniroute:${OMNIROUTE_VERSION:-3.8.48}
+    image: diegosouzapw/omniroute:${OMNIROUTE_VERSION:-3.8.49}
     container_name: omniroute
     restart: unless-stopped
     # SQLite runs in WAL mode — give it time to checkpoint on shutdown or the

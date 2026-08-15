@@ -44,12 +44,12 @@ The same port serves three surfaces: the **dashboard** (browser), the **OpenAI-c
 
 ## 📌 Verified facts worth knowing up front
 
-Everything below was checked against `diegosouzapw/omniroute:3.8.48` — locally with Docker Compose and
+Everything below was checked against `diegosouzapw/omniroute:3.8.49` — locally with Docker Compose and
 on a real Kubernetes API server — not copied from docs:
 
 | Detail | Value |
 |---|---|
-| Image | `diegosouzapw/omniroute:3.8.48`, multi-arch (`linux/amd64` + `linux/arm64`) |
+| Image | `diegosouzapw/omniroute:3.8.49`, multi-arch (`linux/amd64` + `linux/arm64`). A `-web` variant adds Playwright + Chromium (+413 MB) |
 | Port | **20128 only** — dashboard, `/v1` API and MCP all share it |
 | Health endpoint | **`/api/monitoring/health`** → `{"status":"healthy",...}` |
 | Data | SQLite in **WAL** mode at `/app/data/storage.sqlite` (+ `-wal`, `-shm`) |
