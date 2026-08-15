@@ -1,0 +1,134 @@
+# Project name is pinned so volumes are 9router_* regardless of the directory this sits in.
+name: 9router
+
+services:
+  9router:
+    image: decolua/9router:0.5.55
+    container_name: 9router
+    restart: unless-stopped
+    ports:
+      # host:container — both 8080, because PORT below moves the app off its 20128 default.
+      # BIND_ADDR=127.0.0.1 keeps it off the public interface; 0.0.0.0 (default) exposes it.
+      - "${BIND_ADDR:-0.0.0.0}:8080:8080"
+    environment:
+      # --- listener -------------------------------------------------------
+      PORT: "8080"
+      HOSTNAME: 0.0.0.0          # bind all interfaces INSIDE the container
+      NODE_ENV: production
+      DATA_DIR: /app/data
+
+      # --- public URL -----------------------------------------------------
+      # Must match how you reach the dashboard, or OAuth callbacks break.
+      # On a VPS: PUBLIC_URL=http://<public-ip>:8080
+      BASE_URL: ${PUBLIC_URL:-http://localhost:8080}
+      NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-http://localhost:8080}
+      NEXT_PUBLIC_CLOUD_URL: https://9router.com
+
+      # --- secrets ---------------------------------------------------------
+      # Defaults below let `docker compose up -d` work with no .env at all.
+      # They are placeholders, not secrets — override them in .env for anything
+      # reachable beyond your own machine. See .env.example.
+      #
+      # Dashboard login password. Applied on FIRST start only, against an empty
+      # data volume — setting it later does not overwrite an existing password.
+      INITIAL_PASSWORD: ${INITIAL_PASSWORD:-changeme123}
+      # Signs dashboard sessions. Fixed value = sessions survive container recreates.
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me}
+      # HMAC secret 9Router signs generated API keys with. NOT a key you can send
+      # as a Bearer token — mint those in the dashboard's Endpoints section.
+      API_KEY_SECRET: ${API_KEY_SECRET:-dev-api-key-secret-change-me}
+      # Salts the derived machine id.
+      MACHINE_ID_SALT: ${MACHINE_ID_SALT:-dev-machine-id-salt-change-me}
+
+      # --- optional --------------------------------------------------------
+      # Empty = Headroom integration off. Enable with:
+      #   docker compose --profile headroom up -d
+      HEADROOM_URL: ${HEADROOM_URL:-}
+      # true = require a Bearer key on /v1/* even from localhost.
+      REQUIRE_API_KEY: ${REQUIRE_API_KEY:-}
+      DEBUG: ${DEBUG:-}
+    volumes:
+      - 9router-data:/app/data
+    healthcheck:
+      # Hits the login page, not /v1/* — stays valid if you set REQUIRE_API_KEY=true.
+      # `node` is present because 9Router is a Node app; fetch() is global on Node 18+.
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      # First boot runs migrations; failures before this elapses do not count.
+      start_period: 60s
+
+  hermes:
+    image: nousresearch/hermes-agent:v2026.8.13
+    container_name: hermes
+    restart: unless-stopped
+    command: ["gateway", "run"]
+    depends_on:
+      9router:
+        # Wait for the healthcheck above to pass, not merely for the container to exist.
+        condition: service_healthy
+    ports:
+      # Left side is the HOST port and is free to change; the container side is
+      # fixed by API_SERVER_PORT / HERMES_DASHBOARD_PORT below.
+      # The API executes agent work as the container user, so it defaults to
+      # loopback REGARDLESS of BIND_ADDR. Expose it only deliberately.
+      - "${HERMES_API_BIND:-127.0.0.1}:${HERMES_API_HOST_PORT:-8642}:8642"  # API
+      - "${BIND_ADDR:-0.0.0.0}:${HERMES_DASHBOARD_HOST_PORT:-9119}:9119"    # dashboard
+    environment:
+      HERMES_HOME: /opt/data
+      HERMES_SKILLS_DIR: /opt/data/skills
+      HERMES_MEMORY_DIR: /opt/data/memory
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: 0.0.0.0
+      API_SERVER_PORT: "8642"
+      # Bearer token for Hermes' own API on :8642. REQUIRED — with it empty the API
+      # server silently never binds (no log line), and the healthcheck below fails
+      # forever. Committed default is public; override it in .env.
+      API_SERVER_KEY: ${HERMES_API_SERVER_KEY:-dev-hermes-api-key-change-me}
+      GATEWAY_ALLOW_ALL_USERS: "true"
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_HOST: 0.0.0.0
+      HERMES_DASHBOARD_PORT: "9119"
+      # Dashboard login. MANDATORY when HERMES_DASHBOARD_HOST is 0.0.0.0 — Hermes
+      # refuses to bind a non-loopback dashboard with no auth provider and exits,
+      # which shows up as a crash-looping container stuck "unhealthy".
+      #
+      # The default hash below is scrypt("changeme123"), matching 9Router's default
+      # so the stack works out of the box. It is committed and therefore public —
+      # generate your own before exposing the box. See the README.
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USERNAME:-admin}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH: ${HERMES_DASHBOARD_PASSWORD_HASH:-scrypt$$16384$$8$$1$$bhWPFafNKz9xpQtJ600mZw==$$agW1/fYGtnsj8PLtP0N1ISxYf+Hp2d0sVL12q+5mfWg=}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:-dev-dashboard-session-secret-change-me}
+      HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS: "43200"
+      # Hermes reaches 9Router over the compose network — that is NOT loopback from
+      # 9Router's point of view, so this must be a key minted in the Endpoints section.
+      OPENAI_API_KEY: ${NINEROUTER_API_KEY:-}
+    volumes:
+      - hermes-data:/opt/data
+      # NOT read-only: the dashboard's Config page writes to this file, and a
+      # :ro mount makes its SAVE button fail. See hermes-config.yaml.
+      - ./hermes-config.yaml:/opt/data/config.yaml
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8642/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  headroom:
+    image: ghcr.io/chopratejas/headroom:latest
+    container_name: headroom
+    restart: unless-stopped
+    profiles:
+      - headroom
+    ports:
+      # Internal to the compose network by default — 9Router reaches it as http://headroom:8787
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - headroom-cache:/root/.cache/huggingface
+
+volumes:
+  9router-data:
+  hermes-data:
+  headroom-cache:

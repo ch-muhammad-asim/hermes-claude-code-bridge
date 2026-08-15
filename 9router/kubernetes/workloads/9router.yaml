@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: ninerouter
+  namespace: 9router
+  labels:
+    app.kubernetes.io/name: 9router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: 9router
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: 9router
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ninerouter
+  namespace: 9router
+  labels:
+    app.kubernetes.io/name: 9router
+    app.kubernetes.io/component: router
+    app.kubernetes.io/part-of: 9router
+spec:
+  serviceName: ninerouter
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: 9router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: 9router
+        app.kubernetes.io/component: router
+        app.kubernetes.io/part-of: 9router
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: ninerouter
+          image: decolua/9router:0.5.55
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: HOSTNAME
+              value: 0.0.0.0
+            - name: NODE_ENV
+              value: production
+            - name: DATA_DIR
+              value: /app/data
+            # Port-forward target by default. Behind an Ingress, set this to the
+            # external URL or provider OAuth callbacks will not come back.
+            - name: BASE_URL
+              value: http://localhost:8080
+            - name: NEXT_PUBLIC_BASE_URL
+              value: http://localhost:8080
+            - name: NEXT_PUBLIC_CLOUD_URL
+              value: https://9router.com
+          envFrom:
+            - secretRef:
+                name: 9router-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+          readinessProbe:
+            httpGet:
+              # "/" not "/v1/models": the API path 401s for non-loopback callers,
+              # and a probe from the kubelet is never loopback.
+              path: /
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 60
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 2Gi

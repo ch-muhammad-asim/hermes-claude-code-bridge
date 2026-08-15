@@ -1,0 +1,26 @@
+# Seeded into the Hermes PVC at /opt/data/config.yaml by the seed-config init
+# container, then owned by Hermes (the dashboard rewrites this file).
+#
+# TWO blocks are required and they do different jobs:
+#   providers.<key>   DEFINES the endpoint (url, auth, api mode)
+#   model.provider    BINDS the default chat to that endpoint
+#
+# `model` as a bare string is accepted but leaves the provider empty, and Hermes
+# then falls back to its built-in Nous provider — every chat fails with
+# "HTTP 401: Missing Authentication header" while the providers block looks fine.
+#
+# ninerouter:8080 is the in-cluster Service. That is not loopback from 9Router's
+# side, so key_env is mandatory; OPENAI_API_KEY arrives from hermes-secrets.
+
+model:
+  provider: 9router
+  default: oc/mimo-v2.5-free
+
+providers:
+  9router:
+    name: 9Router
+    base_url: http://ninerouter:8080/v1
+    key_env: OPENAI_API_KEY
+    api_mode: chat_completions
+    default_model: oc/mimo-v2.5-free
+    discover_models: true

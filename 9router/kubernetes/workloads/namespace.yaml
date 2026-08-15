@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: 9router
+  labels:
+    app.kubernetes.io/name: 9router
+    app.kubernetes.io/part-of: 9router
