@@ -230,6 +230,8 @@ a warning and starts **unpatched** rather than failing silently:
 | Tools forwarded for a 2-child namespace | `1 TOOL` | `2 TOOL` |
 | Model asked to name its tools | *"no tools to list"* / only `functions` | `exec`, `read_file` |
 | `list the contents of pwd` | *"functions.exec isn't available"* | `function_call exec {"command":"ls -la"}` |
+| Codex Desktop, read | refused | ✅ *Listed files* — real directory listing |
+| Codex Desktop, write | refused | ✅ *Ran mkdir test-1* — directory created |
 
 Reproduce:
 

@@ -85,6 +85,13 @@ also advertises **`claude-fable-5`** as an optional pick.
 |---|-------------|----------|-------|
 | 🧭 | **OmniRoute — Docker** | Self-hosted gateway fanning one OpenAI-compatible endpoint out to many providers, on a laptop via Compose | [`omniroute/docker/`](./omniroute/docker) |
 | 🧭 | **OmniRoute — Kubernetes** | The same gateway in a cluster: StatefulSet + PVC (SQLite/WAL), non-root, API-key enforced, Traefik TLS | [`omniroute/kubernetes/`](./omniroute/kubernetes) |
+| 🔀 | **9Router — Docker** | 9Router + Hermes as one Compose stack: health-gated startup, generated secrets, ~690 models incl. free `oc/*` tiers | [`9router/docker-compose/`](./9router/docker-compose) |
+| 🔀 | **9Router — Kubernetes** | The same pair as StatefulSets with PVCs, two Secrets and a one-command installer | [`9router/kubernetes/`](./9router/kubernetes) |
+| 🔀 | **9Router — plain Docker** | Single container, named volumes, host-port mapping — the minimal path | [`9router/`](./9router) |
+| 🧰 | **Codex CLI + Desktop via 9Router** | OpenAI Codex against a free model, with **working local shell execution** — ships the translator patch that makes it possible | [`9router/codex/`](./9router/codex) |
+
+> Both 9Router stacks install **and self-repair** with one command — `./generate.sh --up` — which generates
+> every secret, starts the stack, mints and *validates* the API key, then warms the model catalog.
 
 **Supporting infra for the Kubernetes path:**
 

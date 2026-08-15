@@ -30,8 +30,8 @@ Desktop shell execution required one patch to 9Router. Without it, `list the con
 so the child `exec` is never exposed to the model.
 
 The fix is [`patches/apply-codex-tool-patch.sh`](patches/apply-codex-tool-patch.sh), wired into the sibling
-Compose stack as an entrypoint wrapper. Verified in Codex Desktop: `list the contents of pwd` now runs and
-returns the real directory listing. Details and reproduction in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+Compose stack as an entrypoint wrapper. Verified in Codex Desktop for both reads and writes: `list the contents of pwd` returns a real
+listing, and `create a new directory test-1` runs `mkdir test-1` successfully. Details and reproduction in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
