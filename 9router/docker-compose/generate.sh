@@ -13,6 +13,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Docker Compose gives the SHELL environment precedence over .env. The Codex
+# guide has users `export NINEROUTER_API_KEY=...` for the CLI, and that export
+# would then silently override whatever this script writes to .env — Hermes
+# would start with a stale key while .env looked correct. Always shell out to
+# Compose with those names unset so .env is authoritative.
+dc() { env -u NINEROUTER_API_KEY -u INITIAL_PASSWORD -u JWT_SECRET -u API_KEY_SECRET \
+           -u MACHINE_ID_SALT -u HERMES_API_SERVER_KEY docker compose "$@"; }
+
 HERMES_IMAGE="${HERMES_IMAGE:-nousresearch/hermes-agent:v2026.8.13}"
 ENV_FILE=".env"
 CREDS_FILE="${CREDS_FILE:-}"
@@ -67,7 +75,7 @@ EOF
 # no longer matches, so a stored key can be present and dead. Test it.
 key_is_valid() {
   [ -n "$1" ] || return 1
-  [ "$(docker compose exec -T hermes sh -lc "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $1' http://9router:8080/v1/models" 2>/dev/null | tr -d '\r')" = "200" ]
+  [ "$(dc exec -T hermes sh -lc "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer $1' http://9router:8080/v1/models" 2>/dev/null | tr -d '\r')" = "200" ]
 }
 
 # Hermes discovers 9Router's ~690 models on demand and caches them. A fresh
@@ -79,7 +87,7 @@ warm_model_cache() {
   pass="$(env_get HERMES_DASHBOARD_PASSWORD_PLAINTEXT)"
   port="$(env_get HERMES_DASHBOARD_HOST_PORT)"; port="${port:-9119}"
   [ -n "$pass" ] || return 0
-  docker compose ps --status running 2>/dev/null | grep -q hermes || return 0
+  dc ps --status running 2>/dev/null | grep -q hermes || return 0
   jar="$(mktemp)"
   curl -sf -o /dev/null -c "$jar" -X POST -H 'Content-Type: application/json' \
     -d "{\"provider\":\"basic\",\"username\":\"admin\",\"password\":\"$pass\",\"next\":\"/\"}" \
@@ -96,7 +104,7 @@ print(max([len(p.get("models") or []) for p in d.get("providers",[]) if "9Router
 fetch_9router_key() {
   local pw key
   pw="$(env_get INITIAL_PASSWORD)"; pw="${pw:-changeme123}"
-  docker compose ps --status running 2>/dev/null | grep -q 9router || {
+  dc ps --status running 2>/dev/null | grep -q 9router || {
     printf '%s⏭  9Router not running — skipping key fetch. Start it, then: ./generate.sh --key-only%s\n' "$c_warn" "$c_off"
     return 0
   }
@@ -143,9 +151,9 @@ fetch_9router_key() {
   # Hermes reads the key from its environment at start, so a running container
   # is still holding the old value. Recreate it (restart re-uses the old env)
   # before anything tries to use the new key.
-  if docker compose ps --status running 2>/dev/null | grep -q hermes; then
+  if dc ps --status running 2>/dev/null | grep -q hermes; then
     printf '♻️  recreating hermes so it picks up the key…\n'
-    docker compose up -d --force-recreate hermes >/dev/null 2>&1 || true
+    dc up -d --force-recreate hermes >/dev/null 2>&1 || true
     local i=0
     while [ "$(docker inspect --format '{{.State.Health.Status}}' hermes 2>/dev/null)" = "starting" ] && [ $i -lt 40 ]; do
       sleep 3; i=$((i+1))
@@ -249,7 +257,7 @@ printf '%s✅ wrote %s%s\n' "$c_ok" "$ENV_FILE" "$c_off"
 # up healthy and 401s every model call, which surfaces only as a 1-model picker.
 if [ "$UP" = "1" ]; then
   printf '⏳ starting the stack…\n'
-  docker compose up -d >/dev/null 2>&1 || die "docker compose up failed"
+  dc up -d >/dev/null 2>&1 || die "docker compose up failed"
   i=0
   while [ "$(docker inspect --format '{{.State.Health.Status}}' 9router 2>/dev/null)" != "healthy" ] && [ $i -lt 60 ]; do
     sleep 3; i=$((i+1))
@@ -267,10 +275,21 @@ fi
 warm_model_cache
 
 if [ "$UP" = "1" ]; then
-  if key_is_valid "$(env_get NINEROUTER_API_KEY)"; then
-    printf '%s✅ verified: Hermes can reach 9Router%s\n' "$c_ok" "$c_off"
+  # Check what Hermes ACTUALLY runs with. Testing the .env string alone gave a
+  # false "verified" while the container held a stale key from a shell export.
+  in_container="$(dc exec -T hermes sh -lc 'printf %s "$OPENAI_API_KEY"' 2>/dev/null | tr -d '\r')"
+  in_env="$(env_get NINEROUTER_API_KEY)"
+  if [ "$in_container" != "$in_env" ]; then
+    printf '%s🛑 Hermes is running a different key than .env — recreating%s\n' "$c_warn" "$c_off"
+    dc up -d --force-recreate hermes >/dev/null 2>&1 || true
+    i=0; while [ "$(docker inspect --format '{{.State.Health.Status}}' hermes 2>/dev/null)" = "starting" ] && [ $i -lt 40 ]; do sleep 3; i=$((i+1)); done
+    in_container="$(dc exec -T hermes sh -lc 'printf %s "$OPENAI_API_KEY"' 2>/dev/null | tr -d '\r')"
+  fi
+  live="$(dc exec -T hermes sh -lc 'curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $OPENAI_API_KEY" http://9router:8080/v1/models' 2>/dev/null | tr -d '\r')"
+  if [ "$live" = "200" ] && [ "$in_container" = "$in_env" ]; then
+    printf '%s✅ verified: Hermes reaches 9Router with the key from .env%s\n' "$c_ok" "$c_off"
   else
-    printf '%s🛑 the 9Router key still does not authenticate — run ./generate.sh --key-only%s\n' "$c_warn" "$c_off"
+    printf '%s🛑 NOT working: Hermes->9Router returned %s. Run ./generate.sh --key-only%s\n' "$c_warn" "${live:-no-response}" "$c_off"
   fi
 fi
 

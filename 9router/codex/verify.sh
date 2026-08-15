@@ -28,12 +28,25 @@ fail() { printf '  %s✗%s %s\n' "$bad" "$off" "$1"; fails=$((fails+1)); }
 info() { printf '%s── %s%s\n' "$dim" "$1" "$off"; }
 
 # ── key ─────────────────────────────────────────────────────────────────────
-KEY="${NINEROUTER_API_KEY:-}"
-if [ -z "$KEY" ] && [ -f "$COMPOSE_DIR/.env" ]; then
-  KEY="$(sed -n 's/^NINEROUTER_API_KEY=//p' "$COMPOSE_DIR/.env" | tail -1)"
+# .env is the source of truth. An exported NINEROUTER_API_KEY (the Codex guide
+# tells you to set one for the CLI) is often stale — using it blindly produced
+# 401s that looked like patch failures. Prefer the export only if it works.
+ENV_KEY=""
+[ -f "$COMPOSE_DIR/.env" ] && ENV_KEY="$(sed -n 's/^NINEROUTER_API_KEY=//p' "$COMPOSE_DIR/.env" | tail -1)"
+KEY="${NINEROUTER_API_KEY:-$ENV_KEY}"
+
+http_code() { curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$URL/v1/models" -H "Authorization: Bearer $1" 2>/dev/null; }
+
+if [ -n "$KEY" ] && [ "$(http_code "$KEY")" != "200" ] && [ -n "$ENV_KEY" ] && [ "$KEY" != "$ENV_KEY" ]; then
+  printf '%s⚠ exported NINEROUTER_API_KEY is stale — using the one from .env%s\n' "$dim" "$off"
+  KEY="$ENV_KEY"
 fi
 if [ -z "$KEY" ]; then
-  echo "${bad}no API key — set NINEROUTER_API_KEY or run ../docker-compose/generate.sh --key-only${off}" >&2
+  echo "${bad}no API key — run ../docker-compose/generate.sh --key-only${off}" >&2
+  exit 2
+fi
+if [ "$(http_code "$KEY")" != "200" ]; then
+  echo "${bad}API key does not authenticate — run ../docker-compose/generate.sh --key-only${off}" >&2
   exit 2
 fi
 
@@ -72,7 +85,9 @@ EOF
 post() { curl -sS --max-time 240 "$URL/v1/responses" -H "Authorization: Bearer $KEY" -H 'content-type: application/json' -d "$1"; }
 
 info "both namespace children forwarded upstream"
+LOG_LINES_BEFORE="$( (cd "$COMPOSE_DIR" && docker compose logs 9router) 2>/dev/null | wc -l | tr -d ' ' )"
 post "$(req 'Do not call anything. List the exact names of every tool you can call, one per line.')" > /tmp/codex-verify-names.json 2>&1
+LOGS_AFTER="$( (cd "$COMPOSE_DIR" && docker compose logs 9router) 2>/dev/null | tail -n +$((LOG_LINES_BEFORE+1)) )"
 NAMES="$(python3 -c "
 import json
 try: d=json.load(open('/tmp/codex-verify-names.json'))
@@ -85,7 +100,10 @@ else
   fail "model did not list both children — got: $(printf '%s' "$NAMES" | head -c 120)"
 fi
 
-TOOLCOUNT="$((cd "$COMPOSE_DIR" && docker compose logs --since 3m 9router 2>/dev/null) | grep '▶ POST' | tail -1 | grep -oE '[0-9]+ TOOLS?' | grep -oE '[0-9]+')"
+# Count only the lines our own request produced: snapshot the log length first,
+# then read the tail. `--since` caught unrelated traffic (e.g. a catalog warm
+# sending 18 tools) and reported a bogus number.
+TOOLCOUNT="$(printf '%s' "$LOGS_AFTER" | grep '▶ POST' | tail -1 | grep -oE '[0-9]+ TOOLS?' | grep -oE '[0-9]+')"
 if [ "${TOOLCOUNT:-0}" -ge 2 ]; then
   pass "9Router forwarded $TOOLCOUNT tools (unpatched sends 1)"
 else

@@ -127,6 +127,14 @@ For the current shell:
 export NINEROUTER_API_KEY='YOUR_9ROUTER_API_KEY'
 ```
 
+> ⚠️ **That export outranks `.env` for Docker Compose.** Compose resolves `${NINEROUTER_API_KEY}` from the
+> shell *before* the env file, so running `docker compose up -d` in this same shell bakes the exported value
+> into Hermes and silently ignores whatever `generate.sh` wrote. The symptom is a stack that looks healthy
+> while every model call 401s. `generate.sh` and `verify.sh` both defend against it — `generate.sh` shells
+> out to Compose with the variable unset, and `verify.sh` falls back to `.env` when the export does not
+> authenticate — but a bare `docker compose up -d` does not. Either use a clean shell for Compose, or
+> `unset NINEROUTER_API_KEY` first.
+
 For macOS GUI processes such as Codex Desktop:
 
 ```bash
