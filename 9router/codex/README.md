@@ -12,6 +12,20 @@ Validated environment:
 - Codex CLI: `0.147.0`
 - Codex Desktop on macOS
 
+## What a from-scratch setup requires
+
+The Compose stack is self-contained; the Codex side is **not** — `~/.codex/` is your machine's config and this
+repo never writes it. A fresh setup is:
+
+| Step | Automated? |
+|---|---|
+| 9Router + Hermes running | ✅ `cd ../docker-compose && ./generate.sh --up` |
+| Codex tool patch applied | ✅ same command (entrypoint wrapper) |
+| 9Router API key minted | ✅ same command |
+| `~/.codex/config.toml` provider block | ❌ manual — [section 4](#4-codex-configtoml) |
+| Key in `~/.codex/.env` (Desktop) and/or exported (CLI) | ❌ manual — [section 2](#2-configure-the-9router-api-key) |
+| Verify the patch is live | ✅ `./verify.sh` |
+
 ## Current status
 
 | Capability | Status |
@@ -126,6 +140,29 @@ For the current shell:
 ```bash
 export NINEROUTER_API_KEY='YOUR_9ROUTER_API_KEY'
 ```
+
+> ⚠️ **A shell `export` is enough for the CLI, but NOT for Codex Desktop.** Desktop is a GUI app launched by
+> Finder/Dock — it never inherits your shell environment, so `env_key = "NINEROUTER_API_KEY"` resolves to
+> nothing and every request fails with `401 API key required for remote API access`. Desktop reads the key
+> from a file instead:
+>
+> ```bash
+> printf 'NINEROUTER_API_KEY=%s\n' 'YOUR_9ROUTER_API_KEY' >> ~/.codex/.env
+> ```
+>
+> Put it in **both** places if you use both clients: the shell export for the CLI, `~/.codex/.env` for Desktop.
+
+> 🔁 **After rotating the key, restart Codex Desktop with ⌘Q.** It reads `~/.codex/.env` once at launch and
+> caches it for the life of the process; closing the window is not enough. The CLI re-reads the file every
+> run, so it recovers on its own — which makes for a confusing split where `codex exec` works and Desktop
+> keeps returning `401`. Rotation happens whenever 9Router's data volume is recreated
+> (`docker compose down -v`), because that regenerates its machine id and purges every issued key.
+>
+> Sync Desktop to the current key in one line:
+>
+> ```bash
+> printf 'NINEROUTER_API_KEY=%s\n' "$(sed -n 's/^NINEROUTER_API_KEY=//p' ../docker-compose/.env | tail -1)" > ~/.codex/.env.new && cat ~/.codex/.env.new
+> ```
 
 > ⚠️ **That export outranks `.env` for Docker Compose.** Compose resolves `${NINEROUTER_API_KEY}` from the
 > shell *before* the env file, so running `docker compose up -d` in this same shell bakes the exported value
