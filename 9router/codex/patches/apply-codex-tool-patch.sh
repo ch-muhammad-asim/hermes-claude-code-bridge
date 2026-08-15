@@ -20,13 +20,20 @@
 # This rewrites the tool array to flatten namespace children into plain
 # function tools and drop `tool_search` (meaningless to a Chat upstream).
 #
+# BOUNDED ON PURPOSE. Codex CLI ships a very large tool catalog (plugins,
+# skills, MCP). Flattening every namespace child produced 333 function
+# declarations and the upstream rejected the payload with HTTP 400 — Desktop
+# was fixed while the CLI broke. The flattened children are capped at
+# CODEX_MAX_TOOLS (default 64); non-namespace tools are always kept and the
+# cap is logged when it bites.
+#
 # Fails loudly: if the pattern is absent (new 9Router build), it logs and
 # starts unpatched rather than silently doing nothing.
 set -e
 
 CHUNKS=/app/.next/server/chunks
 NEEDLE='let r=[...Array.isArray(b.tools)?b.tools:[],...m];'
-REPLACE='let r=(function(_t){const _o=[];for(const _x of _t){if(!_x||typeof _x!=="object")continue;if(_x.type==="tool_search")continue;if(_x.type==="namespace"&&Array.isArray(_x.tools)){for(const _c of _x.tools){if(_c&&typeof _c==="object"&&(_c.type==="function"||_c.type==="custom"))_o.push(_c);}continue;}_o.push(_x);}return _o;})([...Array.isArray(b.tools)?b.tools:[],...m]);'
+REPLACE='let r=(function(_t){const _cap=parseInt(process.env.CODEX_MAX_TOOLS||"64",10);const _plain=[];const _kids=[];for(const _x of _t){if(!_x||typeof _x!=="object")continue;if(_x.type==="tool_search")continue;if(_x.type==="namespace"&&Array.isArray(_x.tools)){for(const _c of _x.tools){if(_c&&typeof _c==="object"&&(_c.type==="function"||_c.type==="custom"))_kids.push(_c);}continue;}_plain.push(_x);}const _room=Math.max(0,_cap-_plain.length);if(_kids.length>_room){try{console.error("[codex-patch] flattened "+_kids.length+" namespace tools, capped to "+_room+" (CODEX_MAX_TOOLS="+_cap+")");}catch(_e){}}return _plain.concat(_kids.slice(0,_room));})([...Array.isArray(b.tools)?b.tools:[],...m]);'
 
 patched=0
 for f in "$CHUNKS"/*.js; do

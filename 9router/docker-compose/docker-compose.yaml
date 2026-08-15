@@ -54,6 +54,9 @@ services:
       DEBUG: ${DEBUG:-}
       # Set to 1 to log Codex tool translation (see ../codex/patches/openai-responses.js)
       CODEX_TOOL_DEBUG: ${CODEX_TOOL_DEBUG:-}
+      # Max flattened Codex namespace tools per request. Codex CLI's catalog can
+      # exceed 300, which the upstream rejects with HTTP 400. Default 64.
+      CODEX_MAX_TOOLS: ${CODEX_MAX_TOOLS:-64}
     volumes:
       - 9router-data:/app/data
       # Codex patch: flattens Responses `namespace` tools (e.g. functions->exec)

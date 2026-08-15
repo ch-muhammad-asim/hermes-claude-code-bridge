@@ -223,6 +223,35 @@ a warning and starts **unpatched** rather than failing silently:
 [codex-patch] WARNING: pattern not found — starting UNPATCHED (9Router build changed?)
 ```
 
+# 6b. The cap, and why it exists
+
+Flattening is **bounded** at `CODEX_MAX_TOOLS` (default `64`).
+
+Codex CLI ships a very large tool catalog — plugins, skills, MCP servers. Unpatched, each namespace collapsed
+into one useless entry, so the request stayed small. Flattening every child sent **333 tool declarations**
+upstream and OpenCode rejected the whole payload:
+
+```text
+▶ POST oc/mimo-v2.5-free · STREAM · 4 MSG · 333 TOOL
+✗ ERROR 400 · [400] Provider returned error
+```
+
+That is the trap in this fix: it repaired Codex **Desktop** (a small tool set) while breaking Codex **CLI**
+(a large one). Non-namespace tools are always kept; only flattened children are capped, and the cap is logged
+when it bites:
+
+```text
+[codex-patch] flattened 321 namespace tools, capped to 51 (CODEX_MAX_TOOLS=64)
+▶ POST oc/mimo-v2.5-free · STREAM · 4 MSG · 63 TOOL   → ok
+```
+
+Raise it if your upstream tolerates more:
+
+```yaml
+environment:
+  CODEX_MAX_TOOLS: "128"
+```
+
 # 7. Verify it yourself
 
 [`verify.sh`](verify.sh) asserts the whole chain and exits non-zero on the first failure, so it works as a
