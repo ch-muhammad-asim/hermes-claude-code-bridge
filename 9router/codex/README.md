@@ -31,7 +31,8 @@ so the child `exec` is never exposed to the model.
 
 The fix is [`patches/apply-codex-tool-patch.sh`](patches/apply-codex-tool-patch.sh), wired into the sibling
 Compose stack as an entrypoint wrapper. Verified in Codex Desktop for both reads and writes: `list the contents of pwd` returns a real
-listing, and `create a new directory test-1` runs `mkdir test-1` successfully. Details and reproduction in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+listing, and `create a new directory test-1` runs `mkdir test-1` successfully. Details and reproduction in [TROUBLESHOOTING.md](TROUBLESHOOTING.md); run
+[`./verify.sh`](verify.sh) to assert the patch is live and working.
 
 ---
 

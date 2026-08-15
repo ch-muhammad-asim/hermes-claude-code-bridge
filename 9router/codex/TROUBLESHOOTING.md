@@ -223,7 +223,34 @@ a warning and starts **unpatched** rather than failing silently:
 [codex-patch] WARNING: pattern not found — starting UNPATCHED (9Router build changed?)
 ```
 
-# 7. Verified result
+# 7. Verify it yourself
+
+[`verify.sh`](verify.sh) asserts the whole chain and exits non-zero on the first failure, so it works as a
+post-deploy gate:
+
+```bash
+cd 9router/codex && ./verify.sh
+```
+
+```text
+── patch applied at startup
+  ✓ container logged: namespace flattening applied
+── patch marker present in the bundled chunk
+  ✓ marker found in 8499.js
+── both namespace children forwarded upstream
+  ✓ model lists both: exec, read_file
+  ✓ 9Router forwarded 2 tools (unpatched sends 1)
+── model emits a real function_call to exec
+  ✓ function_call -> exec
+
+Codex tool patch verified
+```
+
+It reads the API key from `../docker-compose/.env` unless `NINEROUTER_API_KEY` is set, and honours
+`NINEROUTER_URL` and `CODEX_TEST_MODEL`. Run it after every 9Router image bump — that is exactly when the
+bundled-chunk pattern is most likely to move.
+
+# 8. Verified result
 
 | | Before | After |
 |---|---|---|
@@ -239,7 +266,7 @@ Reproduce:
 curl -sS http://127.0.0.1:8080/v1/responses -H "Authorization: Bearer $NINEROUTER_API_KEY" -H 'content-type: application/json' -d '{"model":"oc/mimo-v2.5-free","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"List the contents of the current directory. You must call the exec tool."}]}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec","description":"Run a shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]}]}'
 ```
 
-# 8. Still open: `local_shell`
+# 9. Still open: `local_shell`
 
 `{"type":"local_shell"}` has no `name` and is still filtered out. Codex Desktop's shell tool arrives inside
 the `functions` namespace (which this fixes), but if a Desktop build sends a bare `local_shell` instead, it
