@@ -79,132 +79,55 @@ The functions.exec tool isn't available in my current context.
 
 ---
 
-# 2. Why the current translator drops tools
+# 2. Root cause (verified)
 
-File in upstream 9Router:
+Reproduced against `decolua/9router:0.5.55` by POSTing a Codex-shaped request to `/v1/responses`:
 
-```text
-open-sse/translator/request/openai-responses.js
+```json
+"tools": [
+  {"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec", ...}]},
+  {"type":"local_shell"}
+]
 ```
 
-The translator converts Responses API tools to Chat Completions function tools.
+The model's own reasoning gave it away:
 
-Its current logic requires a tool to have a non-empty `name`:
+```text
+looking at the available tools provided to me, I only see one function called "functions"
+which has an empty description and no parameters defined. There is no "exec" tool
+```
+
+So the namespace is **not** dropped. It *has* a top-level `name`, so the converter turns the whole
+container into ONE parameterless function literally called `functions`, and the child `exec` is never
+exposed. `local_shell`, which has no `name`, is dropped by the same filter.
+
+The conversion lives here, and the `name` guard is what does it:
 
 ```js
 const name = tool.name;
 if (!name || typeof name !== "string" || name.trim() === "") return null;
 ```
 
-That is fine for ordinary function tools.
+# 3. ⚠️ Correction: patching `open-sse/` does nothing
 
-It is not sufficient for Responses-native hosted/container tools such as:
-
-```json
-{
-  "type": "local_shell"
-}
-```
-
-or namespace wrappers such as:
-
-```json
-{
-  "type": "namespace",
-  "name": "functions",
-  "tools": [
-    {
-      "type": "function",
-      "name": "exec"
-    }
-  ]
-}
-```
-
-A Chat Completions model cannot call the namespace object itself. It needs the child callable functions flattened into ordinary function tools.
-
----
-
-# 3. First fix to try: flatten Codex namespaces
-
-This is the recommended first patch because the observed model response specifically refers to:
+The readable source at
 
 ```text
-functions.exec
+/app/open-sse/translator/request/openai-responses.js
 ```
 
-That strongly suggests an `exec` function exists inside a namespace but is not being exposed to MiMo as a normal Chat function.
-
-Edit:
+**is shipped but never executed.** `open-sse/...` does not even resolve from `/app` at runtime
+(`ERR_MODULE_NOT_FOUND`); the code that runs is webpack-bundled into
 
 ```text
-open-sse/translator/request/openai-responses.js
+/app/.next/server/chunks/8499.js
 ```
 
-Find:
+This was verified by instrumenting the readable file with a `console.error` and never seeing the line,
+while 9Router's own request log still reported `1 TOOL` for a two-child namespace.
 
-```js
-const responseTools = [
-  ...(Array.isArray(body.tools) ? body.tools : []),
-  ...additionalTools,
-];
-```
-
-Replace it with:
-
-```js
-function expandResponsesTools(tools = []) {
-  const expanded = [];
-
-  for (const tool of tools) {
-    if (!tool || typeof tool !== "object") continue;
-
-    // Deferred tool discovery is not directly useful to a Chat Completions
-    // upstream. The actual callable tools must be exposed explicitly.
-    if (tool.type === "tool_search") {
-      continue;
-    }
-
-    // Codex can expose callable tools inside a namespace.
-    // Chat Completions does not understand namespace containers,
-    // so flatten child tools into ordinary function/custom tools.
-    if (tool.type === "namespace" && Array.isArray(tool.tools)) {
-      for (const child of tool.tools) {
-        if (!child || typeof child !== "object") continue;
-
-        if (child.type === "function" || child.type === "custom") {
-          expanded.push({
-            ...child,
-            description: [
-              child.description,
-              tool.name
-                ? `Originally exposed by Codex namespace: ${tool.name}`
-                : null,
-            ]
-              .filter(Boolean)
-              .join("\n\n"),
-          });
-        }
-      }
-
-      continue;
-    }
-
-    expanded.push(tool);
-  }
-
-  return expanded;
-}
-
-const responseTools = expandResponsesTools([
-  ...(Array.isArray(body.tools) ? body.tools : []),
-  ...additionalTools,
-]);
-```
-
-Leave the existing conversion logic below this block intact.
-
----
+**Bind-mounting a patched `openai-responses.js` therefore has no effect.** The working fix patches the
+bundled chunk at container start.
 
 # 4. Expected behavior after namespace flattening
 
@@ -248,302 +171,75 @@ If Codex accepts the returned function call and maps it to the local tool runtim
 
 ---
 
-# 5. Recommended repo layout for the patch
-
-Keep patches beside the Codex documentation:
+# 5. Repo layout
 
 ```text
 9router/
 ├── docker-compose/
+│   └── docker-compose.yaml     # entrypoint wrapper + bind mount
 └── codex/
     ├── README.md
     ├── TROUBLESHOOTING.md
     └── patches/
-        └── openai-responses.js
-```
-
-Copy the patched upstream file into:
-
-```text
-9router/codex/patches/openai-responses.js
+        └── apply-codex-tool-patch.sh
 ```
 
 ---
 
-# 6. Bind-mount the patched translator into 9Router
+# 6. The fix, as shipped
 
-In the 9Router Docker Compose service, add a read-only bind mount for the patched translator.
-
-Example:
+[`patches/apply-codex-tool-patch.sh`](patches/apply-codex-tool-patch.sh) rewrites the bundled chunk at
+startup and then execs the image entrypoint. It is wired up in the Compose file:
 
 ```yaml
 services:
   9router:
+    entrypoint: ["/patch/apply-codex-tool-patch.sh"]
+    # Compose's `entrypoint:` override RESETS the image CMD — restate it or the
+    # wrapper execs the entrypoint with no command (su-exec usage error).
+    command: ["node", "custom-server.js"]
     volumes:
-      - 9router-data:/app/data
-      - ../codex/patches/openai-responses.js:/app/open-sse/translator/request/openai-responses.js:ro
+      - ../codex/patches/apply-codex-tool-patch.sh:/patch/apply-codex-tool-patch.sh:ro
 ```
 
-The exact existing volume names may differ; preserve the current Compose configuration and only add the translator bind mount.
-
-Then recreate 9Router:
+Apply it:
 
 ```bash
 cd 9router/docker-compose
-
 docker compose up -d --force-recreate 9router
+docker compose logs 9router | grep codex-patch
 ```
 
-Follow logs:
+Expected:
+
+```text
+[codex-patch] namespace flattening applied to /app/.next/server/chunks/8499.js
+```
+
+The script is idempotent (marker comment), and if the pattern is missing on a future 9Router build it logs
+a warning and starts **unpatched** rather than failing silently:
+
+```text
+[codex-patch] WARNING: pattern not found — starting UNPATCHED (9Router build changed?)
+```
+
+# 7. Verified result
+
+| | Before | After |
+|---|---|---|
+| Tools forwarded for a 2-child namespace | `1 TOOL` | `2 TOOL` |
+| Model asked to name its tools | *"no tools to list"* / only `functions` | `exec`, `read_file` |
+| `list the contents of pwd` | *"functions.exec isn't available"* | `function_call exec {"command":"ls -la"}` |
+
+Reproduce:
 
 ```bash
-docker compose logs -f 9router
+curl -sS http://127.0.0.1:8080/v1/responses -H "Authorization: Bearer $NINEROUTER_API_KEY" -H 'content-type: application/json' -d '{"model":"oc/mimo-v2.5-free","stream":false,"input":[{"role":"user","content":[{"type":"input_text","text":"List the contents of the current directory. You must call the exec tool."}]}],"tools":[{"type":"namespace","name":"functions","tools":[{"type":"function","name":"exec","description":"Run a shell command","parameters":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]}]}'
 ```
 
----
-
-# 7. Restart Codex Desktop after patching
-
-Fully quit Codex/ChatGPT Desktop:
-
-```text
-Cmd+Q
-```
-
-Then reopen it and start a **new** Codex chat.
-
-Test:
-
-```text
-Run pwd using your tools.
-Do not guess.
-```
-
-Then:
-
-```text
-Run ls -la and show me the files.
-```
-
-If it works, the namespace compatibility issue is solved.
-
----
-
-# 8. If it still fails: inspect whether Desktop is using `local_shell`
-
-If the model still reports that shell execution is unavailable, Codex Desktop may be exposing a Responses-native hosted tool such as:
-
-```json
-{
-  "type": "local_shell"
-}
-```
-
-This tool has no ordinary Chat Completions function name.
-
-The existing translator therefore cannot represent it directly as a standard Chat function.
-
-In that case a second compatibility bridge is required.
-
----
-
-# 9. Native `local_shell` bridge design
-
-The required request-side translation is conceptually:
-
-```text
-Responses:
-{ type: "local_shell" }
-
-        |
-        v
-
-9Router request translator
-
-        |
-        v
-
-Chat function declaration:
-{
-  "type": "function",
-  "function": {
-    "name": "__codex_local_shell",
-    "description": "Execute a local shell command through the Codex client",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "command": {
-          "type": "array",
-          "items": { "type": "string" }
-        },
-        "working_directory": {
-          "type": "string"
-        },
-        "timeout_ms": {
-          "type": "integer"
-        },
-        "env": {
-          "type": "object",
-          "additionalProperties": { "type": "string" }
-        }
-      },
-      "required": ["command"],
-      "additionalProperties": false
-    }
-  }
-}
-```
-
-MiMo would then emit:
-
-```text
-tool_call
-name = __codex_local_shell
-```
-
-But that is only half the solution.
-
----
-
-# 10. Response-side translation is also required
-
-Codex Desktop must receive a Responses-native shell call item, not an arbitrary function name.
-
-The response translator therefore needs to map:
-
-```text
-Chat tool_call: __codex_local_shell
-```
-
-into something equivalent to:
-
-```json
-{
-  "type": "local_shell_call",
-  "call_id": "call_123",
-  "action": {
-    "type": "exec",
-    "command": ["pwd"],
-    "working_directory": "/path/to/workspace",
-    "timeout_ms": 10000,
-    "env": {}
-  }
-}
-```
-
-Codex Desktop can then execute the shell action locally.
-
-The return path must also be supported:
-
-```text
-Codex Desktop
-    |
-    | local_shell_call_output
-    v
-9Router
-    |
-    | convert to Chat tool result
-    v
-MiMo
-```
-
-So the full bridge is:
-
-```text
-Responses local_shell
-        -> Chat __codex_local_shell function
-
-Chat __codex_local_shell tool_call
-        -> Responses local_shell_call
-
-Responses local_shell_call_output
-        -> Chat role=tool result
-```
-
-Implementing only the request-side function declaration is not enough.
-
----
-
-# 11. Do not change the working routing configuration
-
-At this point these components are already known to work:
-
-```text
-NINEROUTER_API_KEY
-9Router /v1/responses
-oc/mimo-v2.5-free
-Codex CLI explicit model override
-Codex Desktop text inference
-9Router alias:
-gpt-5.6-sol -> oc/mimo-v2.5-free
-```
-
-Do not add OpenAI credentials merely to work around the shell issue.
-
-Do not remove the working model alias while debugging tool translation.
-
-The remaining problem is specifically:
-
-```text
-Responses tool definitions
-        ->
-9Router translation
-        ->
-Chat-compatible OpenCode/MiMo tools
-```
-
----
-
-# 12. Useful debugging strategy
-
-When testing Desktop shell behavior, inspect 9Router logs and saved request details.
-
-You want to compare:
-
-```text
-raw client request tools
-```
-
-with:
-
-```text
-translated upstream tools
-```
-
-The key questions are:
-
-1. Does the Desktop request contain a `namespace` tool?
-2. Does that namespace contain an `exec`, `exec_command`, or `shell_command` child?
-3. Does the Desktop request contain `local_shell`?
-4. After translation, is the callable shell tool still present in `translatedBody.tools`?
-5. Does MiMo return a `tool_calls` delta?
-6. Does 9Router translate that tool call back into the correct Responses API item type?
-
-If the tool exists in the raw request but disappears from the translated request, the bug is request-side translation.
-
-If MiMo returns a tool call but Codex does not execute it, the bug is response-side translation / item type mapping.
-
----
-
-# 13. Current status summary
-
-```text
-9Router Responses transport             ✅ working
-SSE streaming                           ✅ working
-reasoning events                        ✅ working
-normal text inference                   ✅ working
-named function calling via curl         ✅ working
-Codex CLI text inference                ✅ working
-Codex Desktop text via alias            ✅ working
-Codex Desktop shell execution           ⚠️ not working yet
-```
-
-Recommended next step:
-
-```text
-1. Flatten namespace tools first.
-2. Re-test Codex Desktop shell execution.
-3. Only if still failing, implement the local_shell bridge.
-```
-
-The observed `functions.exec` wording makes **namespace flattening** the best first fix to test.
+# 8. Still open: `local_shell`
+
+`{"type":"local_shell"}` has no `name` and is still filtered out. Codex Desktop's shell tool arrives inside
+the `functions` namespace (which this fixes), but if a Desktop build sends a bare `local_shell` instead, it
+will not be exposed. Converting it to a named function is possible, though Codex would then have to map the
+returned `function_call` back onto its local shell runtime — untested, so it is deliberately not done here.

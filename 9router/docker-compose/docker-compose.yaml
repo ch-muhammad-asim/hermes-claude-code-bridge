@@ -6,6 +6,11 @@ services:
     image: decolua/9router:0.5.55
     container_name: 9router
     restart: unless-stopped
+    # Wraps the image entrypoint: applies the Codex tool patch, then execs it.
+    entrypoint: ["/patch/apply-codex-tool-patch.sh"]
+    # Compose's `entrypoint:` override RESETS the image CMD, so restate it or the
+    # wrapper execs the image entrypoint with no command (su-exec usage error).
+    command: ["node", "custom-server.js"]
     ports:
       # host:container — both 8080, because PORT below moves the app off its 20128 default.
       # BIND_ADDR=127.0.0.1 keeps it off the public interface; 0.0.0.0 (default) exposes it.
@@ -47,8 +52,15 @@ services:
       # true = require a Bearer key on /v1/* even from localhost.
       REQUIRE_API_KEY: ${REQUIRE_API_KEY:-}
       DEBUG: ${DEBUG:-}
+      # Set to 1 to log Codex tool translation (see ../codex/patches/openai-responses.js)
+      CODEX_TOOL_DEBUG: ${CODEX_TOOL_DEBUG:-}
     volumes:
       - 9router-data:/app/data
+      # Codex patch: flattens Responses `namespace` tools (e.g. functions->exec)
+      # into plain Chat function tools, so Codex Desktop's shell tool is actually
+      # callable. Patches the bundled chunk at startup — the readable sources in
+      # /app/open-sse are NOT executed. See ../codex/TROUBLESHOOTING.md
+      - ../codex/patches/apply-codex-tool-patch.sh:/patch/apply-codex-tool-patch.sh:ro
     healthcheck:
       # Hits the login page, not /v1/* — stays valid if you set REQUIRE_API_KEY=true.
       # `node` is present because 9Router is a Node app; fetch() is global on Node 18+.

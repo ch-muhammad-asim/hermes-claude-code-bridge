@@ -22,9 +22,16 @@ Validated environment:
 | named function calling through 9Router | ✅ Working |
 | Codex CLI text inference with MiMo | ✅ Working |
 | Codex Desktop text inference through model alias | ✅ Working |
-| Codex Desktop local shell execution through MiMo alias | ⚠️ Not working yet |
+| Codex Desktop local shell execution through MiMo alias | ✅ Working (needs the Codex tool patch) |
 
-The Desktop limitation is important: normal chat works through the alias, but a request such as `list the contents of pwd` currently results in the model saying that its local exec/shell tool is unavailable. See **Desktop tool limitation** below.
+Desktop shell execution required one patch to 9Router. Without it, `list the contents of pwd` returns
+*"the functions.exec tool isn't available"*: Codex wraps its tools in a Responses `namespace` container, and
+9Router's stock translator collapses that container into a single parameterless function called `functions`,
+so the child `exec` is never exposed to the model.
+
+The fix is [`patches/apply-codex-tool-patch.sh`](patches/apply-codex-tool-patch.sh), wired into the sibling
+Compose stack as an entrypoint wrapper. Verified in Codex Desktop: `list the contents of pwd` now runs and
+returns the real directory listing. Details and reproduction in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
 ---
 
