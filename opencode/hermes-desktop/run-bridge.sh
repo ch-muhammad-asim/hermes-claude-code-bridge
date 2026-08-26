@@ -10,6 +10,9 @@
 #   ./run-bridge.sh                 # run in the foreground (default 127.0.0.1:18282)
 #   ./run-bridge.sh test            # curl /health + a chat completion
 #   ./run-bridge.sh stream          # curl a streaming completion (SSE)
+#   ./run-bridge.sh image FILE.png  # E2E vision test: send an image via base64
+#                                   # (the bridge re-attaches it as an opencode
+#                                   #  --file=... so free models can "see" it)
 #   ./run-bridge.sh models          # list the models the bridge advertises
 #   ./run-bridge.sh selfcheck       # offline logic checks (no opencode needed)
 #   ./run-bridge.sh install-service # install + start a persistent auto-start service
@@ -139,28 +142,57 @@ cmd_run() {
   build_argv; exec "${ARGV[@]}"
 }
 
-curl_auth() { if [ -n "$API_KEY" ]; then printf '%s' "-HAuthorization: Bearer $API_KEY"; fi; }
-
 cmd_test() {
-  local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
-  echo "[bridge] GET /health"; curl -fsS "${auth[@]}" "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
+  # bash-3.2: `"${auth[@]}"` on an EMPTY array aborts under `set -u`; the
+  # ${auth[@]+"${auth[@]}"} guard is the portable idiom. Send the REAL key,
+  # not a mask — a placeholder would just earn a 401.
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  echo "[bridge] GET /health"; curl -fsS ${auth[@]+"${auth[@]}"} "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
   echo "[bridge] POST /v1/chat/completions (model=${MODEL})"
-  curl -fsS --max-time "$((TIMEOUT + 30))" "${auth[@]}" -H 'content-type: application/json' \
+  curl -fsS --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: opencode bridge ok\"}],\"stream\":false}"; echo
 }
 
 cmd_stream() {
-  local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
   echo "[bridge] POST /v1/chat/completions (stream, model=${MODEL})"
-  curl -fsSN --max-time "$((TIMEOUT + 30))" "${auth[@]}" -H 'content-type: application/json' \
+  curl -fsSN --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Count from 1 to 5, one number per line.\"}],\"stream\":true}"
 }
 
+cmd_image() {
+  # End-to-end VISION test: base64 image_url content part -> bridge ->
+  # opencode --file=<tmp>. This is exactly what Hermes sends for screenshots,
+  # so if this passes, image attachments work in the app too.
+  local img="${1:-}"
+  [ -n "$img" ] || { echo "[bridge] usage: $0 image /path/to/image.(png|jpg|webp|gif)" >&2; exit 2; }
+  [ -f "$img" ] || { echo "[bridge] error: file not found: $img" >&2; exit 2; }
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  echo "[bridge] POST /v1/chat/completions (vision, model=${MODEL}, image=$(basename -- "$img"))"
+  "$PY" - "$img" <<PYEOF | curl -fsS ${auth[@]+"${auth[@]}"} --max-time "$((TIMEOUT + 30))" \
+      -H 'content-type: application/json' -d @- \
+      "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions"; echo
+import base64, json, mimetypes, sys
+path = sys.argv[1]
+mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+with open(path, "rb") as f:
+    b64 = base64.b64encode(f.read()).decode()
+print(json.dumps({
+    "model": "${MODEL}",
+    "stream": False,
+    "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this image in one short paragraph."},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+    ]}],
+}))
+PYEOF
+}
+
 cmd_models() {
-  local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
-  curl -fsS "${auth[@]}" "http://127.0.0.1:${BRIDGE_PORT}/v1/models" \
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  curl -fsS ${auth[@]+"${auth[@]}"} "http://127.0.0.1:${BRIDGE_PORT}/v1/models" \
     | "$PY" -c 'import sys,json; [print(m["id"], "" if m.get("free") is None else ("(free)" if m["free"] else "(paid)")) for m in json.load(sys.stdin)["data"]]'
 }
 
@@ -253,9 +285,25 @@ cmd_install_service() {
     linux) install_systemd ;;
     *)     echo "[bridge] error: unsupported OS for auto-service; use ./run-bridge.sh run" >&2; exit 1 ;;
   esac
-  # First boot takes a few seconds (interpreter start + `opencode models` discovery).
-  local i; for i in $(seq 1 60); do curl -fsS "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1 && break; sleep 0.5; done
-  cmd_test || echo "[bridge] (service installed; health not ready yet — check: ./run-bridge.sh logs)"
+  # First boot takes a while (interpreter start + `opencode models` discovery,
+  # sometimes >30s on a cold cache). Wait patiently and SAY so — a bare curl
+  # "connection refused" here reads like the install broke when it didn't.
+  local i up=0
+  touch "$LOG_FILE"
+  printf '[bridge] waiting for http://127.0.0.1:%s/health ' "$BRIDGE_PORT"
+  for i in $(seq 1 240); do
+    if curl -fsS "http://127.0.0.1:${BRIDGE_PORT}/health" >/dev/null 2>&1; then up=1; break; fi
+    printf '.'; sleep 0.5
+  done
+  echo
+  if [ "$up" -eq 1 ]; then
+    cmd_test || echo "[bridge] (endpoint is up; the live completion above failed — retry or check: ./run-bridge.sh logs)"
+  else
+    echo "[bridge] warning: service not healthy after 120s. Last log lines:" >&2
+    tail -n 15 "$LOG_FILE" >&2 || true
+    echo "[bridge] (launchd keeps retrying; watch it with: ./run-bridge.sh logs)" >&2
+    exit 1
+  fi
 }
 cmd_uninstall_service() { case "$(os_kind)" in mac) uninstall_launchd;; linux) uninstall_systemd;; *) echo "nothing to do";; esac; }
 cmd_service_status()   { case "$(os_kind)" in mac) status_launchd;;   linux) status_systemd;;   *) echo "n/a";; esac; }
@@ -264,6 +312,7 @@ case "${1:-run}" in
   run)                cmd_run ;;
   test)               cmd_test ;;
   stream)             cmd_stream ;;
+  image)              shift; cmd_image "$@" ;;
   models)             cmd_models ;;
   selfcheck)          BRIDGE_SELFCHECK=1 exec "$PY" "$BRIDGE_PY" ;;
   install-service)    cmd_install_service ;;
