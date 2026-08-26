@@ -33,14 +33,18 @@ or into a slim container.
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import os
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Iterator, Optional
@@ -91,6 +95,11 @@ FALLBACK_FREE_MODELS = [
 # adds or retires without a restart. 0 disables it.
 DEFAULT_MODEL_REFRESH_INTERVAL = 3600
 DEFAULT_MAX_PROMPT_CHARS = 200_000
+# Images: chat-completions ``image_url`` parts are extracted to temp files and attached
+# via ``opencode run --file``, which forwards them to the model. 0 disables image
+# handling entirely (image parts are then silently dropped, as before).
+DEFAULT_MAX_IMAGES = 4
+DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_TIMEOUT = 300
 # Free tiers rate-limit aggressively, so default lower than the Claude bridge.
 DEFAULT_MAX_CONCURRENCY = 2
@@ -119,6 +128,122 @@ def _text_from_content(content: Any) -> str:
                 parts.append(item)
         return "\n".join(parts)
     return "" if content is None else str(content)
+
+
+# ── images ───────────────────────────────────────────────────────────────────
+_DATA_URL_PREFIX = "data:"
+_EXT_BY_MIME = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+    "image/webp": ".webp", "image/gif": ".gif",
+}
+
+
+class ImageExtractionError(ValueError):
+    """A client-supplied image could not be decoded/attached (HTTP 400)."""
+
+
+def _decode_image_url(url: str, index: int) -> tuple[bytes, Optional[str]]:
+    """Return (bytes, mime) for a chat-completions ``image_url`` value."""
+    url = (url or "").strip()
+    if not url:
+        raise ImageExtractionError(f"message contains an empty image_url (image #{index + 1})")
+    if url.startswith(_DATA_URL_PREFIX):
+        header, _, payload = url.partition(",")
+        mime = header[len(_DATA_URL_PREFIX):].split(";", 1)[0].strip().lower() or None
+        try:
+            data = base64.b64decode(payload, validate=True)
+        except Exception as exc:
+            raise ImageExtractionError(f"image #{index + 1}: invalid base64 data ({exc})") from exc
+        return data, mime
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        path = urllib.request.url2pathname(parsed.path)
+        try:
+            with open(path, "rb") as handle:
+                return handle.read(), None
+        except OSError as exc:
+            raise ImageExtractionError(f"image #{index + 1}: cannot read {path!r} ({exc})") from exc
+    if parsed.scheme in ("http", "https"):
+        try:
+            request = urllib.request.Request(url, headers={"User-Agent": "opencode-bridge"})
+            with urllib.request.urlopen(request, timeout=30) as response:
+                mime = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+                return response.read(), mime or None
+        except OSError as exc:
+            raise ImageExtractionError(f"image #{index + 1}: fetch failed ({exc})") from exc
+    raise ImageExtractionError(
+        f"image #{index + 1}: unsupported image_url scheme {parsed.scheme!r} "
+        "(expected a data:, file: or http(s): URL)")
+
+
+def extract_images(messages: list[dict[str, Any]], max_images: int,
+                   max_bytes_per_image: int) -> list[tuple[bytes, Optional[str]]]:
+    """Collect ``(data, mime)`` for every ``image_url`` content part in ``messages``.
+
+    Order follows the conversation; each image is returned once even if a client
+    re-sends history across turns.
+    """
+    found: list[tuple[bytes, Optional[str]]] = []
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not (isinstance(item, dict) and item.get("type") == "image_url"):
+                continue
+            url = ""
+            inner = item.get("image_url")
+            if isinstance(inner, dict):
+                url = str(inner.get("url") or "")
+            elif isinstance(inner, str):
+                url = inner
+            found.append(_decode_image_url(url, len(found)))
+    if max_images <= 0:
+        if found:
+            raise ImageExtractionError(
+                "this bridge has image support disabled (--max-images 0); resend text-only")
+        return []
+    if len(found) > max_images:
+        raise ImageExtractionError(
+            f"too many images: {len(found)} exceeds the limit of {max_images} per request")
+    oversized = [i + 1 for i, image in enumerate(found) if len(image[0]) > max_bytes_per_image]
+    if oversized:
+        raise ImageExtractionError(
+            f"image(s) {oversized} exceed the per-image limit of {max_bytes_per_image // (1024 * 1024)} MiB")
+    return found
+
+
+def stage_image_files(images: list[tuple[bytes, Optional[str]]]) -> list[str]:
+    """Write extracted images to temp files for ``opencode run --file``.
+
+    Returns absolute paths; cleanup is delegated to ``tempfile.mkdtemp`` via
+    :func:`cleanup_image_files` so a crashed run can never leave them behind.
+    """
+    directory = tempfile.mkdtemp(prefix="opencode-bridge-img-")
+    paths: list[str] = []
+    for index, (data, mime) in enumerate(images):
+        ext = _EXT_BY_MIME.get((mime or "").lower())
+        if not ext:
+            head = bytes(data[:16])
+            sniffed = ("png" if head.startswith(b"\x89PNG\r\n\x1a\n")
+                       else "jpg" if head.startswith(b"\xff\xd8")
+                       else "gif" if head.startswith(b"GIF8")
+                       else "webp" if head[0:4] == b"RIFF" and head[8:12] == b"WEBP"
+                       else "")
+            ext = f".{sniffed}" if sniffed else ".bin"
+        path = os.path.join(directory, f"image-{index + 1}{ext}")
+        with open(path, "wb") as handle:
+            handle.write(data)
+        paths.append(path)
+    return paths
+
+
+def cleanup_image_files(paths: Optional[list[str]]) -> None:
+    """Remove a staged temp directory (best-effort)."""
+    if not paths:
+        return
+    parent = os.path.dirname(paths[0])
+    shutil.rmtree(parent, ignore_errors=True)
 
 
 def build_prompt(messages: list[dict[str, Any]]) -> str:
@@ -348,7 +473,7 @@ def classify_error(message: str) -> int:
     return 429 if any(marker in lowered for marker in _RATE_LIMIT_MARKERS) else 502
 
 
-def build_command(cfg: "BridgeConfig", model: str) -> list[str]:
+def build_command(cfg: "BridgeConfig", model: str, image_files: Optional[list[str]] = None) -> list[str]:
     cmd = [cfg.opencode_bin, "run", "--format", "json", "--model", model]
     if cfg.auto_approve:
         cmd.append("--auto")
@@ -360,6 +485,10 @@ def build_command(cfg: "BridgeConfig", model: str) -> list[str]:
         cmd += ["--variant", cfg.variant]
     if cfg.pure:
         cmd.append("--pure")
+    # Attachments must be ``--file=<path>`` (not ``--file <path>``): yargs would
+    # otherwise eat the following positional as a second file name.
+    for path in image_files or []:
+        cmd.append(f"--file={path}")
     cmd += ["--dir", cfg.cwd]
     return cmd
 
@@ -409,14 +538,17 @@ def delete_session(cfg: "BridgeConfig", session_id: str) -> None:
         pass
 
 
-def run_events(cfg: "BridgeConfig", model: str, prompt: str) -> Iterator[dict[str, Any]]:
+def run_events(cfg: "BridgeConfig", model: str, prompt: str,
+               image_files: Optional[list[str]] = None) -> Iterator[dict[str, Any]]:
     """Run ``opencode run`` and yield normalized events.
 
     Yields ``{'delta': str}`` for assistant text (and tool/reasoning notes when
     enabled), then a final ``{'done': True, 'tokens': {...}, 'cost_usd': float,
     'finish_reason': str}``. The prompt goes in on stdin so it is never argv-bound.
+    ``image_files`` are staged temp files attached via ``--file=<path>`` and the
+    whole staging directory is removed when the run ends.
     """
-    cmd = build_command(cfg, model)
+    cmd = build_command(cfg, model, image_files)
     proc = _popen(cmd, cfg)
     deadline = time.time() + cfg.timeout_seconds
     tokens: dict[str, int] = {}
@@ -490,16 +622,18 @@ def run_events(cfg: "BridgeConfig", model: str, prompt: str) -> Iterator[dict[st
             _kill(proc)
         if session_id:
             threading.Thread(target=delete_session, args=(cfg, session_id), daemon=True).start()
+        cleanup_image_files(image_files)
     yield {"done": True, "tokens": tokens, "cost_usd": cost, "finish_reason": finish}
 
 
-def run_blocking(cfg: "BridgeConfig", model: str, prompt: str) -> dict[str, Any]:
+def run_blocking(cfg: "BridgeConfig", model: str, prompt: str,
+                 image_files: Optional[list[str]] = None) -> dict[str, Any]:
     """Drain ``run_events`` and return {'text','tokens','cost_usd','finish_reason'}."""
     chunks: list[str] = []
     tokens: dict[str, int] = {}
     cost = 0.0
     finish = "stop"
-    for event in run_events(cfg, model, prompt):
+    for event in run_events(cfg, model, prompt, image_files):
         if "delta" in event:
             chunks.append(event["delta"])
         elif event.get("done"):
@@ -523,6 +657,8 @@ class BridgeConfig:
         self.pure = args.pure
         self.delete_sessions = args.delete_sessions
         self.max_prompt_chars = args.max_prompt_chars
+        self.max_images = args.max_images
+        self.max_image_bytes = args.max_image_bytes
         self.timeout_seconds = args.timeout
         self.pass_model = args.pass_model
         self.api_key = args.api_key
@@ -736,6 +872,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 "auto_approve": self.cfg.auto_approve, "show_tools": self.cfg.show_tools,
                 "show_reasoning": self.cfg.show_reasoning, "delete_sessions": self.cfg.delete_sessions,
                 "max_prompt_chars": self.cfg.max_prompt_chars, "timeout_s": self.cfg.timeout_seconds,
+                "max_images": self.cfg.max_images,
+                "max_image_bytes": self.cfg.max_image_bytes,
                 "max_concurrency": self.server.max_concurrency,  # type: ignore[attr-defined]
                 "pass_model": self.cfg.pass_model, "api_key_required": bool(self.cfg.api_key),
             })
@@ -787,24 +925,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(413, {"error": {"message":
                 f"prompt too large: {len(prompt)} chars exceeds {self.cfg.max_prompt_chars}"}})
             return
+        try:
+            images = extract_images(request.get("messages") or [],
+                                    self.cfg.max_images, self.cfg.max_image_bytes)
+        except ImageExtractionError as exc:
+            self._send_json(400, {"error": {"message": str(exc)}})
+            return
+        image_files = stage_image_files(images) if images else []
 
         # Concurrency slot — bound the number of live opencode subprocesses.
         if not self.server.slot.acquire(timeout=self.server.queue_wait):  # type: ignore[attr-defined]
             self.server.metrics.rejected_busy += 1  # type: ignore[attr-defined]
+            cleanup_image_files(image_files)  # staged but never handed to run_events
             self._send_json(429, {"error": {"message": "bridge busy: too many concurrent requests"}})
             return
         try:
             if request.get("stream") is True:
-                self._handle_stream(model, prompt)
+                self._handle_stream(model, prompt, image_files)
             else:
-                self._handle_blocking(model, prompt)
+                self._handle_blocking(model, prompt, image_files)
         finally:
             self.server.slot.release()  # type: ignore[attr-defined]
 
-    def _handle_blocking(self, model: str, prompt: str) -> None:
+    def _handle_blocking(self, model: str, prompt: str, image_files: Optional[list[str]] = None) -> None:
         started = time.time()
         try:
-            res = run_blocking(self.cfg, model, prompt)
+            res = run_blocking(self.cfg, model, prompt, image_files)
         except OpenCodeError as exc:
             self.server.metrics.record(error=True)  # type: ignore[attr-defined]
             self._send_json(exc.exit_code, {"error": {"message": str(exc)}})
@@ -822,7 +968,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "usage": usage,
         })
 
-    def _handle_stream(self, model: str, prompt: str) -> None:
+    def _handle_stream(self, model: str, prompt: str, image_files: Optional[list[str]] = None) -> None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         started = time.time()
@@ -841,7 +987,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             tokens: dict[str, int] = {}
             cost = 0.0
             finish = "stop"
-            for event in run_events(self.cfg, model, prompt):
+            for event in run_events(self.cfg, model, prompt, image_files):
                 if "delta" in event:
                     self.wfile.write(frame({"content": event["delta"]}))
                     self.wfile.flush()
@@ -940,6 +1086,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-sessions", dest="delete_sessions", action="store_false")
     p.add_argument("--max-prompt-chars", type=int,
                    default=int(os.getenv("OPENCODE_BRIDGE_MAX_PROMPT_CHARS", str(DEFAULT_MAX_PROMPT_CHARS))))
+    p.add_argument("--max-images", type=int,
+                   default=int(os.getenv("OPENCODE_BRIDGE_MAX_IMAGES", str(DEFAULT_MAX_IMAGES))),
+                   help="max image_url attachments accepted per request (0 disables image support)")
+    p.add_argument("--max-image-bytes", type=int,
+                   default=int(os.getenv("OPENCODE_BRIDGE_MAX_IMAGE_BYTES", str(DEFAULT_MAX_IMAGE_BYTES))),
+                   help="per-image size limit in bytes (data: URLs and fetched http(s) images)")
     p.add_argument("--api-key", default=os.getenv("OPENCODE_BRIDGE_API_KEY", ""))
     p.add_argument("--timeout", type=int, default=int(os.getenv("OPENCODE_BRIDGE_TIMEOUT", str(DEFAULT_TIMEOUT))))
     p.add_argument("--max-concurrency", type=int,

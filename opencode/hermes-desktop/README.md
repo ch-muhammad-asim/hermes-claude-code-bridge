@@ -199,6 +199,8 @@ Set these in the environment or in a `.env` next to `run-bridge.sh` (they're bak
 | `OPENCODE_BRIDGE_VARIANT` | *(default)* | Reasoning variant (`minimal`, `high`, `max`) |
 | `OPENCODE_BRIDGE_SHOW_TOOLS` | `0` | `1` inlines `› read(file)` progress notes in the reply |
 | `OPENCODE_BRIDGE_SHOW_REASONING` | `0` | `1` passes `--thinking` and inlines reasoning blocks |
+| `OPENCODE_BRIDGE_MAX_IMAGES` | `4` | Max `image_url` attachments per request (`0` disables image support) |
+| `OPENCODE_BRIDGE_MAX_IMAGE_BYTES` | `10485760` | Per-image size limit in bytes (10 MiB) |
 | `OPENCODE_BIN` | *(auto)* | Explicit path to the `opencode` binary |
 
 ```bash
