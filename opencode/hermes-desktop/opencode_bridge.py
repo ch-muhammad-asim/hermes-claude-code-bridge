@@ -37,6 +37,7 @@ import base64
 import hmac
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -98,8 +99,10 @@ DEFAULT_MAX_PROMPT_CHARS = 200_000
 # Images: chat-completions ``image_url`` parts are extracted to temp files and attached
 # via ``opencode run --file``, which forwards them to the model. 0 disables image
 # handling entirely (image parts are then silently dropped, as before).
+# 32 MiB: full-screen Retina/5K screenshots are routinely 10-25 MiB, and Hermes
+# sends screenshots uncompressed, so a 10 MiB cap rejected them with HTTP 400.
 DEFAULT_MAX_IMAGES = 4
-DEFAULT_MAX_IMAGE_BYTES = 10 * 1024 * 1024
+DEFAULT_MAX_IMAGE_BYTES = 32 * 1024 * 1024
 DEFAULT_TIMEOUT = 300
 # Free tiers rate-limit aggressively, so default lower than the Claude bridge.
 DEFAULT_MAX_CONCURRENCY = 2
@@ -151,7 +154,9 @@ def _decode_image_url(url: str, index: int) -> tuple[bytes, Optional[str]]:
         header, _, payload = url.partition(",")
         mime = header[len(_DATA_URL_PREFIX):].split(";", 1)[0].strip().lower() or None
         try:
-            data = base64.b64decode(payload, validate=True)
+            # Some clients line-wrap base64 payloads; strip whitespace before the
+            # strict decode or a perfectly good image is rejected as corrupt.
+            data = base64.b64decode(re.sub(r"\s+", "", payload), validate=True)
         except Exception as exc:
             raise ImageExtractionError(f"image #{index + 1}: invalid base64 data ({exc})") from exc
         return data, mime
@@ -183,6 +188,25 @@ def extract_images(messages: list[dict[str, Any]], max_images: int,
     Order follows the conversation; each image is returned once even if a client
     re-sends history across turns.
     """
+    # Count first, download later: an over-limit request must be rejected before
+    # any data: payload is decoded or any http(s) image is fetched.
+    declared = 0
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                declared += 1
+    if max_images <= 0:
+        if declared:
+            raise ImageExtractionError(
+                "this bridge has image support disabled (--max-images 0); resend text-only")
+        return []
+    if declared > max_images:
+        raise ImageExtractionError(
+            f"too many images: {declared} exceeds the limit of {max_images} per request")
+
     found: list[tuple[bytes, Optional[str]]] = []
     for message in messages or []:
         content = message.get("content")
@@ -198,14 +222,6 @@ def extract_images(messages: list[dict[str, Any]], max_images: int,
             elif isinstance(inner, str):
                 url = inner
             found.append(_decode_image_url(url, len(found)))
-    if max_images <= 0:
-        if found:
-            raise ImageExtractionError(
-                "this bridge has image support disabled (--max-images 0); resend text-only")
-        return []
-    if len(found) > max_images:
-        raise ImageExtractionError(
-            f"too many images: {len(found)} exceeds the limit of {max_images} per request")
     oversized = [i + 1 for i, image in enumerate(found) if len(image[0]) > max_bytes_per_image]
     if oversized:
         raise ImageExtractionError(
@@ -251,13 +267,20 @@ def build_prompt(messages: list[dict[str, Any]]) -> str:
 
     ``opencode run`` has no ``--append-system-prompt``, so system turns are hoisted
     into a delimited block at the top of the prompt; user/assistant turns keep their
-    roles so multi-turn context survives.
+    roles so multi-turn context survives. A turn whose content is ONLY image parts
+    yields the ``(see attached image)`` placeholder — otherwise it would be skipped
+    as empty and the request rejected as prompt-less despite valid attachments.
     """
     system_parts: list[str] = []
     convo: list[str] = []
+    has_images = False
     for message in messages or []:
         role = str(message.get("role") or "user").lower()
-        text = _text_from_content(message.get("content")).strip()
+        content = message.get("content")
+        if isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+            has_images = True
+        text = _text_from_content(content).strip()
         if not text:
             continue
         if role == "system":
@@ -268,7 +291,10 @@ def build_prompt(messages: list[dict[str, Any]]) -> str:
     if system_parts:
         blocks.append("<system-instructions>\n" + "\n\n".join(system_parts) + "\n</system-instructions>")
     blocks.append("\n\n".join(convo))
-    return "\n\n".join(b for b in blocks if b).strip()
+    prompt = "\n\n".join(b for b in blocks if b).strip()
+    if not prompt and has_images:
+        return "(see attached image)"  # attachments ride separately via --file=
+    return prompt
 
 
 def _safe_error_text(text: str) -> str:
@@ -559,6 +585,9 @@ def run_events(cfg: "BridgeConfig", model: str, prompt: str,
     # we have already forwarded so a delta is only ever the new suffix.
     emitted: dict[str, int] = {}
     error: Optional[OpenCodeError] = None
+    # Drain stderr CONTINUOUSLY: reading it only after exit deadlocks whenever
+    # opencode writes more than the OS pipe buffer (~64 KiB) holds.
+    stderr_chunks: list[str] = []
 
     def _writer() -> None:
         try:
@@ -568,12 +597,30 @@ def run_events(cfg: "BridgeConfig", model: str, prompt: str,
         except (BrokenPipeError, OSError, ValueError):
             pass
 
+    def _drain_stderr() -> None:
+        try:
+            assert proc.stderr is not None
+            for raw in iter(proc.stderr.readline, ""):
+                stderr_chunks.append(raw)
+        except (OSError, ValueError):
+            pass
+
+    def _watchdog() -> None:
+        # The loop below only checks the deadline when a line ARRIVES, so an
+        # opencode that wedges mid-run would hang the request forever. Enforce
+        # the deadline here: killing the process EOFs the pipe and unblocks it.
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.5)
+        if proc.poll() is None:
+            _kill(proc)
+
     threading.Thread(target=_writer, daemon=True).start()
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
             if time.time() > deadline:
-                _kill(proc)
                 raise OpenCodeError("opencode command timed out", exit_code=504)
             line = line.strip()
             if not line or not line.startswith("{"):
@@ -610,11 +657,15 @@ def run_events(cfg: "BridgeConfig", model: str, prompt: str,
                 data = info.get("data") if isinstance(info.get("data"), dict) else {}
                 message = str((data or {}).get("message") or info.get("name") or "opencode error")
                 error = OpenCodeError(_safe_error_text(message), classify_error(message))
-        rc = proc.wait(timeout=10)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill(proc)  # outlived its own exit grace: SIGTERM/KILL the tree, then reap
+            rc = proc.wait(timeout=10)
         if error is not None:
             raise error
         if rc != 0:
-            err = (proc.stderr.read() if proc.stderr else "") or ""
+            err = "".join(stderr_chunks).strip()
             message = _safe_error_text(err or f"opencode exited with code {rc}")
             raise OpenCodeError(message, classify_error(message))
     finally:
@@ -1258,6 +1309,41 @@ def _selfcheck() -> None:
     # A failed skill load must name the skill, not render as a bare `skill()`.
     assert _tool_note({"tool": "skill", "state": {"status": "error",
                                                   "input": {"name": "lead-devops-sre"}}}) == "\n✗ skill(lead-devops-sre)\n"
+
+    # ── vision path (the reason most users deploy this bridge) ──────────────
+    raw_png = b"\x89PNG\r\n\x1a\n12345678"
+    png_b64 = base64.b64encode(raw_png).decode()
+    # Line-wrapped base64 (some clients fold it) must still decode.
+    folded = "\n".join(png_b64[i:i + 16] for i in range(0, len(png_b64), 16))
+    data, mime = _decode_image_url(f"data:image/png;base64,{folded}", 0)
+    assert data == raw_png and mime == "image/png", (data, mime)
+    # An image-only turn must yield the attachment placeholder, not "" (which
+    # would 400 the request despite perfectly valid attachments).
+    image_only = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}}]}]
+    assert build_prompt(image_only) == "(see attached image)", build_prompt(image_only)
+    mixed = [{"role": "user", "content": [
+        {"type": "text", "text": "what is this?"}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png_b64}"}}]}]
+    assert build_prompt(mixed) == "USER:\nwhat is this?", build_prompt(mixed)  # text wins, image rides via --file=
+    staged = stage_image_files([(raw_png, None)])  # mime-less: magic-byte sniffing picks .png
+    try:
+        assert staged[0].endswith(".png"), staged
+    finally:
+        cleanup_image_files(staged)
+    assert not os.path.exists(os.path.dirname(staged[0])), "staging dir must be cleaned up"
+    # Over-limit image COUNT is refused before any payload is decoded/fetched.
+    try:
+        extract_images(image_only * 5, DEFAULT_MAX_IMAGES, DEFAULT_MAX_IMAGE_BYTES)
+        raise SystemExit("selfcheck: over-limit image count was accepted")
+    except ImageExtractionError as exc:
+        assert "too many images" in str(exc), exc
+    assert extract_images([], 0, DEFAULT_MAX_IMAGE_BYTES) == []          # disabled + none present
+    try:
+        extract_images(image_only, 0, DEFAULT_MAX_IMAGE_BYTES)           # disabled + image -> clear error
+        raise SystemExit("selfcheck: images accepted while support is disabled")
+    except ImageExtractionError as exc:
+        assert "--max-images 0" in str(exc), exc
+
     print("selfcheck ok")
 
 

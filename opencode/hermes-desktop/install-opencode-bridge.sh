@@ -19,9 +19,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Mirror run-bridge.sh: honour a .env next to the scripts so what we INSTALL and
+# what we PRINT here can never disagree.
+[ -f "$SCRIPT_DIR/.env" ] && { set -a; . "$SCRIPT_DIR/.env"; set +a; }
 NO_SERVICE=0
 [ "${1:-}" = "--no-service" ] && NO_SERVICE=1
 
+BRIDGE_HOST="${BRIDGE_HOST:-127.0.0.1}"
 BRIDGE_PORT="${BRIDGE_PORT:-18282}"
 MODEL="${OPENCODE_BRIDGE_MODEL:-opencode/mimo-v2.5-free}"
 
@@ -31,9 +35,9 @@ warn() { printf '\033[33m[warn]\033[0m    %s\n' "$*"; }
 die()  { printf '\033[31m[error]\033[0m   %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# --- 1. Python 3 (the bridge is stdlib-only) --------------------------------
-have python3 || die "python3 not found. Install Xcode CLT (xcode-select --install), Homebrew Python, or your distro's python3, then re-run."
-ok "python3 $(python3 --version 2>&1 | awk '{print $2}')"
+PY_BIN="$(command -v python3 || command -v python || true)"
+have python3 || have python || die "python3 not found. Install Xcode CLT (xcode-select --install), Homebrew Python, or your distro's python3, then re-run."
+ok "python3 $("$PY_BIN" --version 2>&1 | awk '{print $2}')"
 
 # --- 2. OpenCode CLI --------------------------------------------------------
 if ! have opencode; then
@@ -64,7 +68,11 @@ else
 fi
 
 # --- 4. Offline logic checks ------------------------------------------------
-BRIDGE_SELFCHECK=1 python3 "$SCRIPT_DIR/opencode_bridge.py" >/dev/null && ok "bridge selfcheck passed"
+if BRIDGE_SELFCHECK=1 "$PY_BIN" "$SCRIPT_DIR/opencode_bridge.py" >/dev/null; then
+  ok "bridge selfcheck passed"
+else
+  die "bridge selfcheck failed — see the traceback above"
+fi
 
 # --- 5. Register the bridge as a user service ------------------------------
 if [ "$NO_SERVICE" -eq 1 ]; then
@@ -75,7 +83,7 @@ else
   "$SCRIPT_DIR/run-bridge.sh" install-service
 fi
 
-ok "Done. Endpoint: http://127.0.0.1:${BRIDGE_PORT}/v1  (model: ${MODEL})"
+ok "Done. Endpoint: http://$([ "$BRIDGE_HOST" = "0.0.0.0" ] || [ "$BRIDGE_HOST" = "::" ] && echo 127.0.0.1 || echo "$BRIDGE_HOST"):${BRIDGE_PORT}/v1  (model: ${MODEL})"
 echo
 echo "Next steps:"
 echo "  ./run-bridge.sh test             # health check + a live completion"
@@ -84,6 +92,6 @@ echo "  ./run-bridge.sh service-status   # service state"
 echo "  ./run-bridge.sh logs             # tail the service log"
 echo
 echo "In Hermes: Settings -> Model -> Custom endpoint"
-echo "  Base URL: http://127.0.0.1:${BRIDGE_PORT}/v1"
+echo "  Base URL: http://$([ "$BRIDGE_HOST" = "0.0.0.0" ] || [ "$BRIDGE_HOST" = "::" ] && echo 127.0.0.1 || echo "$BRIDGE_HOST"):${BRIDGE_PORT}/v1"
 echo "  API key:  (leave empty unless you set OPENCODE_BRIDGE_API_KEY)"
 echo "  Model:    ${MODEL}"

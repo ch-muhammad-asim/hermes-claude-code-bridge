@@ -144,20 +144,19 @@ cmd_run() {
 
 cmd_test() {
   # bash-3.2: `"${auth[@]}"` on an EMPTY array aborts under `set -u`; the
-  # ${auth[@]+"${auth[@]}"} guard is the portable idiom. Send the REAL key,
-  # not a mask — a placeholder would just earn a 401.
-  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  # ${auth[@]+"${auth[@]}"} guard is the portable idiom.
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer ${API_KEY}")
   echo "[bridge] GET /health"; curl -fsS ${auth[@]+"${auth[@]}"} "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
   echo "[bridge] POST /v1/chat/completions (model=${MODEL})"
-  curl -fsS --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
+  curl -sS --fail-with-body --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: opencode bridge ok\"}],\"stream\":false}"; echo
 }
 
 cmd_stream() {
-  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer ${API_KEY}")
   echo "[bridge] POST /v1/chat/completions (stream, model=${MODEL})"
-  curl -fsSN --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
+  curl -sSN --fail-with-body --max-time "$((TIMEOUT + 30))" ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Count from 1 to 5, one number per line.\"}],\"stream\":true}"
 }
@@ -169,9 +168,9 @@ cmd_image() {
   local img="${1:-}"
   [ -n "$img" ] || { echo "[bridge] usage: $0 image /path/to/image.(png|jpg|webp|gif)" >&2; exit 2; }
   [ -f "$img" ] || { echo "[bridge] error: file not found: $img" >&2; exit 2; }
-  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer ${API_KEY}")
   echo "[bridge] POST /v1/chat/completions (vision, model=${MODEL}, image=$(basename -- "$img"))"
-  "$PY" - "$img" <<PYEOF | curl -fsS ${auth[@]+"${auth[@]}"} --max-time "$((TIMEOUT + 30))" \
+  "$PY" - "$img" <<PYEOF | curl -sS --fail-with-body ${auth[@]+"${auth[@]}"} --max-time "$((TIMEOUT + 30))" \
       -H 'content-type: application/json' -d @- \
       "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions"; echo
 import base64, json, mimetypes, sys
@@ -191,7 +190,7 @@ PYEOF
 }
 
 cmd_models() {
-  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer $API_KEY")
+  local -a auth=(); [ -n "$API_KEY" ] && auth=(-H "Authorization: Bearer ${API_KEY}")
   curl -fsS ${auth[@]+"${auth[@]}"} "http://127.0.0.1:${BRIDGE_PORT}/v1/models" \
     | "$PY" -c 'import sys,json; [print(m["id"], "" if m.get("free") is None else ("(free)" if m["free"] else "(paid)")) for m in json.load(sys.stdin)["data"]]'
 }
