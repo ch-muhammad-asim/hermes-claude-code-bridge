@@ -1,7 +1,7 @@
 # 🚦 Traefik values for the k3s cluster
 
 `k3s-values.yaml` is derived from
-[`../../../aws/kubernetes/traefik/eks-values.yaml`](../../../aws/kubernetes/traefik/eks-values.yaml)
+[`../../aws/kubernetes/traefik/eks-values.yaml`](../../aws/kubernetes/traefik/eks-values.yaml)
 — same chart version, same entrypoints, same `traefik-external` IngressClass, same
 access-log and metrics posture. Only the Service and scheduling differ.
 

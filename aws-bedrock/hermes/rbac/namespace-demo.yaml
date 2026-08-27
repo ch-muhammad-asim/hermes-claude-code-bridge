@@ -1,6 +1,6 @@
 # The namespace the remediation RoleBinding targets. Declared in the base so the
 # binding always has a namespace to land in; the workload that gets broken on
-# purpose lives in the ../sre-demo overlay, not here.
+# purpose lives in the ../../sre-demo overlay, not here.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -41,7 +41,7 @@ use the k3s path instead:
 | --- | --- | --- |
 | Infra unit | `terragrunt apply --working-dir eks` + `hermes-bedrock-iam` | `terragrunt apply --working-dir hermes-k3s` |
 | Bedrock credentials | EKS Pod Identity association | EC2 instance profile (IMDS) |
-| Apply | `kubectl apply -k kubernetes` | `kubectl apply -k overlays/k3s` |
+| Apply | `kubectl apply -k hermes` | `kubectl apply -k overlays/k3s` |
 | StorageClass | `gp3` (ebs.csi.aws.com) | `local-path` (patched by the overlay) |
 | Ingress LB | NLB via AWS Load Balancer Controller | k3s servicelb (klipper) binding host 80/443 |
 
@@ -138,7 +138,7 @@ EKS (NLB via the AWS Load Balancer Controller — install that first, see
 `aws/kubernetes/aws-load-balancer-controller/README.md`):
 
 ```bash
-helm -n traefik upgrade --install traefik traefik/traefik --version "$CHART_VERSION" --create-namespace --values ../../../aws/kubernetes/traefik/eks-values.yaml --wait --timeout 6m
+helm -n traefik upgrade --install traefik traefik/traefik --version "$CHART_VERSION" --create-namespace --values ../../aws/kubernetes/traefik/eks-values.yaml --wait --timeout 6m
 ```
 
 k3s (no LB controller; klipper binds host 80/443):

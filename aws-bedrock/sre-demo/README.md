@@ -10,13 +10,13 @@ cause and repair it. This is the agentic-SRE showcase.
 k3s:
 
 ```bash
-kubectl apply -k hermes-agent/aws-bedrock/sre-demo/k3s
+kubectl apply -k aws-bedrock/sre-demo/k3s
 ```
 
 EKS:
 
 ```bash
-kubectl apply -k hermes-agent/aws-bedrock/sre-demo
+kubectl apply -k aws-bedrock/sre-demo
 ```
 
 Then ask Hermes *"the demo-nginx deployment in the demo namespace is broken, diagnose
@@ -36,13 +36,13 @@ both already open in the base — so the overlay adds only the broken workload:
 
 | Gate | What it controls | Where |
 |------|------------------|-------|
-| **1 · RBAC** | Can the ServiceAccount write at all? | `kubernetes/rbac/clusterrole-sre-remediation.yaml` + a per-namespace RoleBinding |
-| **2 · Skill** | Does Hermes's own disposition permit a write? | `kubernetes/skills/sre-pod-remediation/SKILL.md` |
+| **1 · RBAC** | Can the ServiceAccount write at all? | `hermes/rbac/clusterrole-sre-remediation.yaml` + a per-namespace RoleBinding |
+| **2 · Skill** | Does Hermes's own disposition permit a write? | `hermes/skills/sre-pod-remediation/SKILL.md` |
 
 Gate 2 is the one people miss: with RBAC open but a skill that says *"never mutate
 production"*, the agent declines on principle.
 
-**The third gate from [`../../../hermes-agent-devops-demo`](../../../hermes-agent-devops-demo)
+**The third gate from [`../../hermes-agent-devops-demo`](../../hermes-agent-devops-demo)
 does not exist on this path.** That demo also has to open the Claude Code harness tool
 policy (`CLAUDE_CODE_ALLOWED_TOOLS`), because Hermes drives Claude Code there. Here
 Hermes talks to Bedrock through the bridge and runs `kubectl` with its own `terminal`
@@ -56,11 +56,11 @@ cluster-wide as the reference demo does.
 |------|--------------|
 | `base/01-broken-deployment.yaml` | `demo-nginx` on `nginx:faulty` — a tag that does not exist → **ImagePullBackOff** |
 | `base/kustomization.yaml` | The workload alone, so both overlays consume it as a directory |
-| `kustomization.yaml` | EKS overlay: `../kubernetes` + `base` |
-| `k3s/kustomization.yaml` | k3s overlay: `../../overlays/k3s` + `../base` |
+| `kustomization.yaml` | EKS overlay: `../hermes` + `base` |
+| `k3s/kustomization.yaml` | k3s overlay: composes the k3s overlay with `base/` |
 
 The `demo` namespace and the RoleBinding that authorizes the fix live in the **base**
-(`kubernetes/rbac/`), not here — the agent's permissions are part of its deployment,
+(`hermes/rbac/`), not here — the agent's permissions are part of its deployment,
 not of a demo.
 
 ## ▶️ Walkthrough
@@ -112,7 +112,7 @@ kubectl -n demo get deploy demo-nginx -o jsonpath='{.spec.template.spec.containe
 **4. Revert.** Removes the broken workload; the agent and its RBAC stay:
 
 ```bash
-kubectl delete -k hermes-agent/aws-bedrock/sre-demo/k3s
+kubectl delete -k aws-bedrock/sre-demo/k3s
 ```
 
 To revoke the write capability entirely, drop the binding — the read-only base is

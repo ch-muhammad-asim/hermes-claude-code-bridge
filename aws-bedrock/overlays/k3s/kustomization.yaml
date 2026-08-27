@@ -2,7 +2,7 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
 # ── k3s overlay ────────────────────────────────────────────────────────────────
-# The base (../../kubernetes) targets EKS. Two things in it are EKS-specific and are
+# The base (../../hermes) targets EKS. Two things in it are EKS-specific and are
 # patched here rather than weakened in the base, so the base stays correct for the
 # day the account's SCP permits eks:CreateCluster:
 #
@@ -17,9 +17,9 @@ kind: Kustomization
 #                           patch for it here — only this note, so nobody goes
 #                           looking for one.
 #
-#   kubectl apply -k hermes-agent/aws-bedrock/overlays/k3s
+#   kubectl apply -k aws-bedrock/overlays/k3s
 resources:
-  - ../../kubernetes
+  - ../../hermes
 
 # Drop the gp3 StorageClass: its provisioner is not installed on k3s.
 patches:

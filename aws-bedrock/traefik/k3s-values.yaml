@@ -1,5 +1,5 @@
 # Traefik Helm values for the single-node k3s cluster (modules/hermes-k3s).
-# Derived from ../../../aws/kubernetes/traefik/eks-values.yaml - same chart version,
+# Derived from ../../aws/kubernetes/traefik/eks-values.yaml - same chart version,
 # same entrypoints, same traefik-external IngressClass; only the Service and
 # scheduling differ. See the k3s specifics block below.
 # Chart: traefik/traefik v41.3.0 (see ./README.md; keep this in sync with CHART_VERSION)

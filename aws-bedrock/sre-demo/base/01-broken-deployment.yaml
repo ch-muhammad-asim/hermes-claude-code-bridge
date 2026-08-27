@@ -2,7 +2,7 @@
 # exist on Docker Hub, so the pod lands in ImagePullBackOff — the issue Hermes fixes.
 #
 # The `demo` namespace itself and the RoleBinding that authorizes the fix both live in
-# the base (../kubernetes/rbac/), so this overlay adds only the broken workload.
+# the base (../../hermes/rbac/), so this overlay adds only the broken workload.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

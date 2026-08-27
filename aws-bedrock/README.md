@@ -1,7 +1,7 @@
 # ☁️ Hermes Amazon Bedrock Deployment
 
 Deployment of the **Hermes Lead SRE Agent** backed by **Amazon Bedrock Claude Sonnet
-4.5**, running on the EKS blueprint in [`../../aws/`](../../aws/) behind **Traefik**.
+4.5**, running on the EKS blueprint in [`../aws/`](../aws/) behind **Traefik**.
 Hermes runs with a custom `bedrock-claude-bridge` sidecar that translates its
 chat-completions calls into Bedrock `InvokeModel` requests against the Anthropic
 Messages API. This path uses no Claude Code CLI and no Claude subscription session.
@@ -16,31 +16,43 @@ Target environment
   Ingress:      hermes.saqlainmushtaq.com  (Traefik IngressRoute, traefik-external)
 ```
 
-Ported from [`../../vertex-ai/`](../../vertex-ai/) — the Hermes runtime configuration
+Ported from [`../vertex-ai/`](../vertex-ai/) — the Hermes runtime configuration
 is unchanged; see [What differs from the Vertex deployment](#-what-differs-from-the-vertex-deployment).
 
 ## 🗂️ Layout
 
 ```text
-hermes-agent/aws-bedrock/
-├── README.md                 # this file — overview, architecture, security posture
-├── kubernetes/               # self-contained Kustomize root: `kubectl apply -k kubernetes`
-│   ├── bridge/               # bedrock_claude_bridge.py + requirements (+ local-dev README)
-│   ├── github-cli/           # read-only `gh` wrapper
-│   ├── identity/             # SOUL.md (agent identity)
-│   ├── skills/               # version-controlled Hermes skills (declaratively installed)
+aws-bedrock/                  # sibling of vertex-ai/ — one directory per cloud provider
+├── README.md                 # this file — architecture, security posture, Vertex delta
+├── hermes/                   # the agent itself: Kustomize root, `kubectl apply -k hermes`
+│   ├── bridge/               # bedrock_claude_bridge.py + requirements
+│   ├── github-cli/           # read-only `gh` wrapper (fresh App token per call)
+│   ├── identity/             # SOUL.md — the always-loaded agent identity
+│   ├── skills/               # declaratively installed Hermes skills
 │   │   ├── lead-devops-sre/        # greeting + capability profile
 │   │   └── sre-pod-remediation/    # the scoped "fix a pod" disposition gate
-│   ├── rbac/                 # namespaces, SA, read-only RBAC, scoped remediation RBAC
+│   ├── rbac/                 # namespaces, ServiceAccount, read-only + remediation RBAC
 │   ├── secrets/              # secret.template.yaml (render with envsubst — never apply raw)
 │   ├── storage/              # gp3 StorageClass
-│   ├── workloads/            # StatefulSet, Service, IngressRoute
-│   └── README.md             # deploy runbook
-├── overlays/k3s/             # patches the base for a k3s cluster (local-path, no gp3)
+│   └── workloads/            # StatefulSet, Service, IngressRoute
+├── overlays/k3s/             # patches the base for k3s (local-path, no gp3)
 ├── traefik/                  # k3s Traefik values, derived from aws/kubernetes/traefik
-└── sre-demo/                 # overlay: a Deployment broken on purpose, for the fix demo
+└── sre-demo/                 # a Deployment broken on purpose, for the fix demo
     ├── base/                 # the broken workload, shared by both overlays
     └── k3s/                  # the demo composed on the k3s overlay
+```
+
+**Every directory carries its own README** explaining what it does and the decisions
+behind it — start at the one nearest whatever you are changing.
+
+## 🧭 Relationship to the rest of the repo
+
+```text
+aws-bedrock/                Hermes on AWS Bedrock            <- this tree
+vertex-ai/                  Hermes on Google Vertex AI       <- the deployment this is ported from
+kubernetes/                 Hermes via the Claude Code CLI bridge, on GKE
+aws/                        The Terragrunt AWS blueprint this runs on
+hermes-agent-devops-demo/   The CLI-bridge flavour of the fix-a-pod demo (three gates)
 ```
 
 ## 📚 Documentation map
@@ -48,9 +60,18 @@ hermes-agent/aws-bedrock/
 | Document | Scope |
 | --- | --- |
 | This file | Overview, architecture, bridge configuration, security posture, Vertex delta |
-| [`kubernetes/README.md`](kubernetes/README.md) | Deploy runbook: infra prerequisites, apply flow, secrets, validation, troubleshooting |
-| [`kubernetes/bridge/README.md`](kubernetes/bridge/README.md) | Bridge IAM, local dev, run, in-cluster validation, troubleshooting |
-| [`sre-demo/README.md`](sre-demo/README.md) | End-to-end demo: break a pod, have Hermes diagnose and fix it |
+| [`hermes/README.md`](hermes/README.md) | **Deploy runbook** — infra prerequisites, apply flow, secrets, validation, DNS/TLS, troubleshooting |
+| [`hermes/bridge/README.md`](hermes/bridge/README.md) | Bridge IAM, local dev, tool-loop testing, env reference, design rationale |
+| [`hermes/rbac/README.md`](hermes/rbac/README.md) | Every grant and every deliberate denial, and how to verify the boundary |
+| [`hermes/skills/README.md`](hermes/skills/README.md) | How skills are installed declaratively, and why a skill is a gate |
+| [`hermes/identity/README.md`](hermes/identity/README.md) | `SOUL.md` — what belongs in identity vs a skill |
+| [`hermes/workloads/README.md`](hermes/workloads/README.md) | StatefulSet/Service/IngressRoute, and the details that cost hours if changed carelessly |
+| [`hermes/secrets/README.md`](hermes/secrets/README.md) | Required and optional Secrets; why there is no AWS credential |
+| [`hermes/storage/README.md`](hermes/storage/README.md) | gp3 vs gp2, `WaitForFirstConsumer`, and the k3s difference |
+| [`hermes/github-cli/README.md`](hermes/github-cli/README.md) | The read-only `gh` wrapper — per-call token minting and the allowlist |
+| [`overlays/README.md`](overlays/README.md) | Cluster-flavour patches and why k3s needs so little |
+| [`traefik/README.md`](traefik/README.md) | k3s Traefik values vs the EKS ones, install, verify |
+| [`sre-demo/README.md`](sre-demo/README.md) | End-to-end: break a pod, have Hermes diagnose and fix it |
 
 ## 🏗️ Architecture
 
@@ -90,7 +111,7 @@ server). Kubernetes access is the pod's own ServiceAccount token.
 
 ## 🌉 The bedrock-claude-bridge
 
-[`kubernetes/bridge/bedrock_claude_bridge.py`](kubernetes/bridge/bedrock_claude_bridge.py)
+[`hermes/bridge/bedrock_claude_bridge.py`](hermes/bridge/bedrock_claude_bridge.py)
 is a chat-completions-compatible HTTP shim:
 
 * Exposes `GET /health`, `GET /v1/models`, `POST /v1/chat/completions`.
@@ -127,12 +148,12 @@ That has an IAM consequence that costs people hours: a `us.` profile may route
 inference to **us-east-1, us-east-2 or us-west-2**, and the policy must authorize the
 underlying foundation model in *every* one of those regions plus the profile ARN
 itself. Authorize only the profile and the first cross-region failover returns
-`AccessDeniedException`. [`aws/modules/hermes-bedrock-iam`](../../aws/modules/hermes-bedrock-iam)
+`AccessDeniedException`. [`aws/modules/hermes-bedrock-iam`](../aws/modules/hermes-bedrock-iam)
 does this correctly.
 
 ### ⚙️ Configuration
 
-Set on the `bedrock-claude-bridge` container (see [`kubernetes/workloads/statefulset.yaml`](kubernetes/workloads/statefulset.yaml)):
+Set on the `bedrock-claude-bridge` container (see [`hermes/workloads/statefulset.yaml`](hermes/workloads/statefulset.yaml)):
 
 | Variable | Production value | Purpose |
 | --- | --- | --- |
@@ -179,10 +200,10 @@ Two gates must both be open, and they are independent:
 
 | Gate | What it controls | Where it lives |
 | --- | --- | --- |
-| **1 · RBAC** | Can the ServiceAccount perform the write at all? | [`kubernetes/rbac/clusterrole-sre-remediation.yaml`](kubernetes/rbac/clusterrole-sre-remediation.yaml) + a per-namespace RoleBinding |
-| **2 · Skill** | Does Hermes's own disposition permit a write? | [`kubernetes/skills/sre-pod-remediation/SKILL.md`](kubernetes/skills/sre-pod-remediation/SKILL.md) |
+| **1 · RBAC** | Can the ServiceAccount perform the write at all? | [`hermes/rbac/clusterrole-sre-remediation.yaml`](hermes/rbac/clusterrole-sre-remediation.yaml) + a per-namespace RoleBinding |
+| **2 · Skill** | Does Hermes's own disposition permit a write? | [`hermes/skills/sre-pod-remediation/SKILL.md`](hermes/skills/sre-pod-remediation/SKILL.md) |
 
-The reference demo in [`../../hermes-agent-devops-demo`](../../hermes-agent-devops-demo)
+The reference demo in [`../hermes-agent-devops-demo`](../hermes-agent-devops-demo)
 needs a *third* gate — the Claude Code harness tool policy. **That gate does not
 exist on this path**: Hermes talks to Bedrock through the bridge and runs `kubectl`
 with its own `terminal` tool, so there is no `CLAUDE_CODE_ALLOWED_TOOLS` to open.
@@ -225,7 +246,7 @@ The `hermes-agent-github-app` Secret is **optional** in this deployment (unlike 
 Vertex one): the Secret volume and both env vars are marked `optional: true`, so the
 pod starts on a cluster with no GitHub App configured and `gh` is simply
 unauthenticated until you create the Secret and roll the StatefulSet. Setup commands
-are in [`kubernetes/README.md`](kubernetes/README.md).
+are in [`hermes/README.md`](hermes/README.md).
 
 ## 🔒 Security posture
 
@@ -297,7 +318,7 @@ cannot even read the policy. It is unconditional; verified denied across:
 * the real `terragrunt apply --working-dir eks`
 
 No cluster is pre-provisioned in any region either. `ec2:RunInstances` at
-`t3.medium` **is** permitted, so [`aws/modules/hermes-k3s`](../../aws/modules/hermes-k3s)
+`t3.medium` **is** permitted, so [`aws/modules/hermes-k3s`](../aws/modules/hermes-k3s)
 provisions a single-node k3s cluster as a drop-in substitute for the `eks` unit.
 Use `modules/eks` in any account whose SCP permits it — everything layered above the
 cluster is identical either way, and **the bridge is byte-identical**: boto3's default
@@ -306,15 +327,15 @@ credential chain resolves EKS Pod Identity on EKS and the EC2 instance profile o
 ## 🛠️ Deployment
 
 Infra first, then the agent — the full runbook is in
-[`kubernetes/README.md`](kubernetes/README.md):
+[`hermes/README.md`](hermes/README.md):
 
 ```bash
 # 1. Infra (Terragrunt)
 #      vpc  ->  eks + hermes-bedrock-iam      (where EKS is permitted)
 #      vpc  ->  hermes-k3s                    (AI sandbox)
 # 2. Traefik   pinned chart 41.3.0, CRDs first, traefik-external IngressClass
-# 3. Secrets   envsubst < kubernetes/secrets/secret.template.yaml | kubectl apply -f -
-# 4. Agent     kubectl apply -k kubernetes        (EKS)
+# 3. Secrets   envsubst < hermes/secrets/secret.template.yaml | kubectl apply -f -
+# 4. Agent     kubectl apply -k hermes        (EKS)
 #              kubectl apply -k overlays/k3s      (k3s)
 # 5. Demo      kubectl apply -k sre-demo/k3s
 ```
@@ -342,4 +363,4 @@ Deployed and validated end to end in account `381491923945` / `us-east-1`:
 DNS for `hermes.saqlainmushtaq.com` still needs an A record at the node IP, and the
 IngressRoute serves Traefik's self-signed certificate until cert-manager or the
 Cloudflare proxy fronts it — see
-[`kubernetes/README.md`](kubernetes/README.md) → **DNS and TLS**.
+[`hermes/README.md`](hermes/README.md) → **DNS and TLS**.

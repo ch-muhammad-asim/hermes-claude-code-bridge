@@ -4,7 +4,7 @@
 # this namespace. That is the whole point: `hermes-sre-remediation` is defined once,
 # and every namespace Hermes may repair opts in explicitly here.
 #
-# `demo` is the namespace the SRE demo breaks on purpose (../sre-demo). Add another
+# `demo` is the namespace the SRE demo breaks on purpose (../../sre-demo). Add another
 # namespace by copying this file and changing metadata.namespace.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -5,7 +5,7 @@ kind: Kustomization
 # composed on top of the k3s overlay (local-path storage, no gp3 StorageClass) instead
 # of the EKS-targeted base. Use ../ on EKS, this on k3s.
 #
-#   kubectl apply -k hermes-agent/aws-bedrock/sre-demo/k3s
+#   kubectl apply -k aws-bedrock/sre-demo/k3s
 resources:
   - ../../overlays/k3s
   - ../base
