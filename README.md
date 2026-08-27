@@ -72,6 +72,29 @@ Every deployment exposes the same endpoint: **`http://<host>:18181/v1`**. Defaul
 `claude-opus-4-8`, except [`docker-bridge/`](./docker-bridge) which defaults to **`claude-opus-5`** and
 also advertises **`claude-fable-5`** as an optional pick.
 
+**Native cloud-provider models (no Claude Code CLI, no Claude subscription):**
+
+Hermes talks to a pod-local bridge sidecar that translates chat-completions into the
+cloud provider's own Anthropic Messages API, authenticating with keyless workload
+credentials. The bridge listens on **`http://127.0.0.1:18182/v1`** — pod-local, never
+public. One directory per cloud:
+
+| | Cloud | Model | Identity | Ingress | Guide |
+|---|---|---|---|---|---|
+| ☁️ | **Google Cloud** — Vertex AI on GKE | `claude-opus-4-8`, or `gemini-3.5-flash` (deployed default) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
+| 🟧 | **AWS** — Bedrock on EKS or k3s | **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5`, inference-profile only) | EKS Pod Identity, or EC2 instance profile | Traefik `IngressRoute` | [`hermes-agent/aws-bedrock/`](./hermes-agent/aws-bedrock) |
+
+The AWS deployment is a port of the Google one — same Hermes runtime config, same
+hardening posture, same chat-completions ⇄ Anthropic Messages translation. It adds one
+capability the Google path does not have: **scoped Kubernetes write access, so the agent
+repairs a broken workload instead of only reporting it.** Read-only everywhere else,
+enforced by RBAC rather than by trusting the model.
+
+Why either of these instead of the CLI path: native Kubernetes ServiceAccount RBAC,
+cloud-native IAM and billing, and no dependency on `claude -p`. The tradeoff is that you
+own the translation bridge — so prompt caching, retries and cost telemetry are
+implemented in it.
+
 **Same protocol, different agent CLI:**
 
 | | Environment | Best for | Guide |
@@ -98,9 +121,11 @@ also advertises **`claude-fable-5`** as an optional pick.
 | | Component | Purpose | Guide |
 |---|---|---|---|
 | ☁️ | **GCP / GKE** | Provision a cost-optimized VPC + GKE cluster (Workload Identity, on-demand 3-node) — one command via [`gcp-infra.sh`](./gcp/gcp-infra.sh) | [`gcp/`](./gcp) |
-| 🚦 | **Traefik v3** | TLS ingress controller for the dashboard/API `IngressRoute` (chart-pinned CRDs) | [`kubernetes/traefik/`](./kubernetes/traefik) |
+| 🟧 | **AWS / EKS** | Terragrunt-driven EKS blueprint: VPC, EKS (access entries, add-ons), Karpenter, ALB controller IAM — plus the Bedrock IAM and k3s units the agent uses | [`aws/`](./aws) |
+| 🚦 | **Traefik v3** | TLS ingress controller for the dashboard/API `IngressRoute`, chart-pinned CRDs. Per-platform values: GKE, EKS (NLB via the AWS LB Controller), k3s (klipper) | [`kubernetes/traefik/`](./kubernetes/traefik) · [`aws/kubernetes/traefik/`](./aws/kubernetes/traefik) · [`hermes-agent/aws-bedrock/traefik/`](./hermes-agent/aws-bedrock/traefik) |
 | 🎬 | **DevOps demo** | Break a deployment, watch Hermes diagnose & fix it, then revoke — a read-only → scoped-grant → revoke showcase | [`hermes-agent-devops-demo/`](./hermes-agent-devops-demo) |
 | 🎬 | **DevOps demo (OpenCode)** | The same three-gate diagnose-and-fix story on **free** models, at $0 inference | [`opencode-demo/`](./opencode-demo) |
+| 🎬 | **SRE demo (Bedrock)** | The same diagnose-and-fix story on Bedrock — **two** gates, not three, because the native path has no Claude Code harness policy to open; RBAC is bound per namespace | [`hermes-agent/aws-bedrock/sre-demo/`](./hermes-agent/aws-bedrock/sre-demo) |
 
 ---
 
