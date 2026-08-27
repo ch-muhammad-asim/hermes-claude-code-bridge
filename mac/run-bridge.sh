@@ -9,6 +9,7 @@
 # Usage:
 #   ./run-bridge.sh                 # run in the foreground (default 127.0.0.1:18181)
 #   ./run-bridge.sh test            # curl /health + a chat completion
+#   ./run-bridge.sh image FILE.png  # E2E vision test: send an image via base64
 #   ./run-bridge.sh selfcheck       # offline logic checks (no claude needed)
 #   ./run-bridge.sh install-service # install + start a persistent auto-start service
 #   ./run-bridge.sh uninstall-service
@@ -115,9 +116,37 @@ cmd_test() {
   local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
   echo "[bridge] GET /health"; curl -fsS "${auth[@]}" "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
   echo "[bridge] POST /v1/chat/completions"
-  curl -fsS "${auth[@]}" -H 'content-type: application/json' \
+  curl -sS --fail-with-body "${auth[@]}" -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: claude code bridge ok\"}],\"stream\":false}"; echo
+}
+
+cmd_image() {
+  # End-to-end VISION test: base64 image_url content part -> bridge -> staged
+  # temp file -> claude Read tool. This is exactly what Hermes sends for
+  # screenshots, so if this passes, image attachments work in the app too.
+  local img="${1:-}"
+  [ -n "$img" ] || { echo "[bridge] usage: $0 image /path/to/image.(png|jpg|webp|gif)" >&2; exit 2; }
+  [ -f "$img" ] || { echo "[bridge] error: file not found: $img" >&2; exit 2; }
+  local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
+  echo "[bridge] POST /v1/chat/completions (vision, model=${MODEL}, image=$(basename -- "$img"))"
+  "$PY" - "$img" <<PYEOF | curl -sS --fail-with-body "${auth[@]}" \
+      -H 'content-type: application/json' -d @- \
+      "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions"; echo
+import base64, json, mimetypes, sys
+path = sys.argv[1]
+mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+with open(path, "rb") as f:
+    b64 = base64.b64encode(f.read()).decode()
+print(json.dumps({
+    "model": "${MODEL}",
+    "stream": False,
+    "messages": [{"role": "user", "content": [
+        {"type": "text", "text": "Describe this image in one short paragraph."},
+        {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+    ]}],
+}))
+PYEOF
 }
 
 # ── service: macOS (launchd LaunchAgent) ──────────────────────────────────────
@@ -221,6 +250,7 @@ cmd_service_status()   { case "$(os_kind)" in mac) status_launchd;;   linux) sta
 case "${1:-run}" in
   run)                cmd_run ;;
   test)               cmd_test ;;
+  image)              shift; cmd_image "$@" ;;
   selfcheck)          BRIDGE_SELFCHECK=1 exec "$PY" "$BRIDGE_PY" ;;
   install-service)    cmd_install_service ;;
   uninstall-service)  cmd_uninstall_service ;;

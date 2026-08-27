@@ -31,14 +31,20 @@ still completes from the final `result` event.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
 import os
+import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,9 +68,140 @@ CLAUDE_CODE_MODELS = [
 ]
 DEFAULT_EFFORT = "medium"
 DEFAULT_PERMISSION_MODE = "dontAsk"
+
+# Images: chat-completions ``image_url`` parts are staged to a per-request temp
+# dir that is handed to the CLI via ``--add-dir`` so its Read tool can view
+# them. 32 MiB fits full-screen Retina screenshots; 0 disables image handling
+# (image parts are then silently dropped, as before).
+DEFAULT_MAX_IMAGES = 4
+DEFAULT_MAX_IMAGE_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_PROMPT_CHARS = 200_000
 DEFAULT_SESSION_STORE = "/opt/data/proxy-sessions.json"
 DEFAULT_MAX_SESSIONS = 2000
+
+
+
+# ── images ────────────────────────────────────────────────────────────────────
+_IMAGE_EXT = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+    "image/webp": ".webp", "image/gif": ".gif",
+}
+
+
+class ImageExtractionError(ValueError):
+    """A client-supplied image could not be decoded/attached (HTTP 400)."""
+
+
+def _decode_image_url(url: str, index: int) -> tuple[bytes, str | None]:
+    """Return (bytes, mime) for a chat-completions ``image_url`` value."""
+    url = (url or "").strip()
+    if not url:
+        raise ImageExtractionError(f"message contains an empty image_url (image #{index + 1})")
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        mime = header[5:].split(";")[0].strip().lower() or None
+        try:
+            # Some clients line-wrap base64 payloads; strip whitespace before the
+            # strict decode or a perfectly good image is rejected as corrupt.
+            data = base64.b64decode(re.sub(r"\s+", "", payload), validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ImageExtractionError(f"image #{index + 1}: invalid base64 data ({exc})") from exc
+        return data, mime
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        file_path = urllib.request.url2pathname(parsed.path)
+        try:
+            with open(file_path, "rb") as fh:
+                return fh.read(), None
+        except OSError as exc:
+            raise ImageExtractionError(f"image #{index + 1}: cannot read {file_path!r} ({exc})") from exc
+    if parsed.scheme in ("http", "https"):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return resp.read(), (resp.headers.get_content_type() or None)
+        except Exception as exc:  # noqa: BLE001
+            raise ImageExtractionError(f"image #{index + 1}: fetch failed ({exc})") from exc
+    raise ImageExtractionError(
+        f"image #{index + 1}: unsupported image_url scheme {parsed.scheme!r} "
+        "(use a data: URI or an http(s)/file URL)")
+
+
+def extract_images(messages: list[dict[str, Any]], max_images: int,
+                   max_bytes_per_image: int) -> list[tuple[bytes, str | None]]:
+    """Collect ``(data, mime)`` for every ``image_url`` content part in ``messages``."""
+    declared = 0
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                declared += 1
+    if max_images <= 0:
+        if declared:
+            raise ImageExtractionError(
+                "this proxy has image support disabled (--max-images 0); resend text-only")
+        return []
+    if declared > max_images:
+        raise ImageExtractionError(
+            f"too many images: {declared} exceeds the limit of {max_images} per request")
+    found: list[tuple[bytes, str | None]] = []
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not (isinstance(item, dict) and item.get("type") == "image_url"):
+                continue
+            inner = item.get("image_url")
+            url = inner.get("url") if isinstance(inner, dict) else inner
+            found.append(_decode_image_url(str(url or ""), len(found)))
+    oversized = [i + 1 for i, image in enumerate(found) if len(image[0]) > max_bytes_per_image]
+    if oversized:
+        raise ImageExtractionError(
+            f"image(s) {oversized} exceed the per-image limit of {max_bytes_per_image // (1024 * 1024)} MiB")
+    return found
+
+
+def stage_image_files(images: list[tuple[bytes, str | None]]) -> tuple[str | None, list[str]]:
+    """Write extracted images into a fresh temp dir; return (dir, file paths).
+
+    The dir is handed to the CLI via ``--add-dir`` so the Read tool can view the
+    files; the caller must remove it (cleanup_image_dir) when the request ends.
+    """
+    if not images:
+        return None, []
+    directory = tempfile.mkdtemp(prefix="claude-bridge-images-")
+    paths: list[str] = []
+    for index, (data, mime) in enumerate(images):
+        ext = _IMAGE_EXT.get((mime or "").lower())
+        if not ext:
+            head = data[:12]
+            sniffed = ("png" if head.startswith(b"\x89PNG\r\n\x1a\n")
+                       else "jpg" if head.startswith(b"\xff\xd8")
+                       else "webp" if head[8:12] == b"WEBP"
+                       else "gif" if head.startswith((b"GIF87a", b"GIF89a"))
+                       else "png")
+            ext = f".{sniffed}"
+        file_path = os.path.join(directory, f"image-{index + 1}{ext}")
+        with open(file_path, "wb") as fh:
+            fh.write(data)
+        paths.append(file_path)
+    return directory, paths
+
+
+def cleanup_image_dir(directory: str | None) -> None:
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def image_attachment_note(paths: list[str]) -> str:
+    """Prompt suffix telling the CLI to view the staged files with Read."""
+    if not paths:
+        return ""
+    listing = "\n".join(f"  {p}" for p in paths)
+    return ("\n\n[The user attached the following image file(s). "
+            "View each with the Read tool before answering:\n" + listing + "\n]")
 
 
 def _split_csv(value: str) -> list[str]:
@@ -90,7 +227,11 @@ def _prompt_from_messages(messages: list[dict[str, Any]]) -> str:
     sections: list[str] = []
     for message in messages:
         role = str(message.get("role") or "user")
-        text = _text_from_content(message.get("content")).strip()
+        content = message.get("content")
+        text = _text_from_content(content).strip()
+        if not text and isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+            text = "(see attached image)"  # attachments ride separately via --add-dir
         if text:
             sections.append(f"{role.upper()}:\n{text}")
     return "\n\n".join(sections).strip()
@@ -100,7 +241,11 @@ def _latest_user_text(messages: list[dict[str, Any]]) -> str:
     """Text of the most recent user turn, for resume requests."""
     for message in reversed(messages):
         if str(message.get("role")) == "user":
-            text = _text_from_content(message.get("content")).strip()
+            content = message.get("content")
+            text = _text_from_content(content).strip()
+            if not text and isinstance(content, list) and any(
+                    isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+                text = "(see attached image)"
             if text:
                 return text
     return _prompt_from_messages(messages)
@@ -441,18 +586,31 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             )
             return
 
+        try:
+            images = extract_images(messages,
+                                    int(getattr(srv, "max_images", DEFAULT_MAX_IMAGES)),
+                                    int(getattr(srv, "max_image_bytes", DEFAULT_MAX_IMAGE_BYTES)))
+        except ImageExtractionError as exc:
+            self._send_json(400, {"error": {"message": str(exc)}})
+            return
+        image_dir, image_paths = stage_image_files(images)
+
         stream = request.get("stream") is True and srv.stream_output  # type: ignore[attr-defined]
 
         # Bound concurrent CLI subprocesses to protect sidecar memory.
         if not srv.concurrency.acquire(timeout=srv.queue_timeout):  # type: ignore[attr-defined]
+            cleanup_image_dir(image_dir)  # staged but never handed to the CLI
             self._send_json(503, {"error": {"message": "proxy busy: concurrency limit reached"}})
             return
         try:
-            self._handle_completion(request, model, messages, prompt, stream)
+            self._handle_completion(request, model, messages, prompt, stream,
+                                    image_dir, image_attachment_note(image_paths))
         finally:
             srv.concurrency.release()  # type: ignore[attr-defined]
+            cleanup_image_dir(image_dir)
 
-    def _build_cmd(self, model: str, prompt: str, resume_id: str | None, new_id: str | None) -> list[str]:
+    def _build_cmd(self, model: str, prompt: str, resume_id: str | None, new_id: str | None,
+                   image_dir: str | None = None) -> list[str]:
         srv = self.server
         cmd = [
             srv.claude_bin,  # type: ignore[attr-defined]
@@ -477,12 +635,18 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
         if srv.max_budget_usd:  # type: ignore[attr-defined]
             cmd.extend(["--max-budget-usd", str(srv.max_budget_usd)])  # type: ignore[attr-defined]
         if srv.allowed_tools and srv.allowed_tools != ["*"]:  # type: ignore[attr-defined]
-            cmd.extend(["--allowedTools", ",".join(srv.allowed_tools)])  # type: ignore[attr-defined]
+            allowed = list(srv.allowed_tools)  # type: ignore[attr-defined]
+            if image_dir and "Read" not in allowed:
+                allowed.append("Read")  # staged images are useless if Read is blocked
+            cmd.extend(["--allowedTools", ",".join(allowed)])
         if srv.disallowed_tools:  # type: ignore[attr-defined]
             cmd.extend(["--disallowedTools", ",".join(srv.disallowed_tools)])  # type: ignore[attr-defined]
         # Expose approved read roots (image cache, skills) to Claude Code. Only pass
         # dirs that exist so a not-yet-created cache dir can't crash the run.
-        for directory in srv.additional_dirs:  # type: ignore[attr-defined]
+        extra_dirs = list(srv.additional_dirs)  # type: ignore[attr-defined]
+        if image_dir:
+            extra_dirs.append(image_dir)
+        for directory in extra_dirs:
             if os.path.isdir(directory):
                 cmd.extend(["--add-dir", directory])
         # The guardrail system prompt only needs to be set when the session is
@@ -499,6 +663,8 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
         messages: list[dict[str, Any]],
         full_prompt: str,
         stream: bool,
+        image_dir: str | None = None,
+        image_note: str = "",
     ) -> None:
         srv = self.server
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
@@ -514,13 +680,13 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             store_key = _convo_key(messages)
             resume_id = srv.sessions.get(prev_key)  # type: ignore[attr-defined]
 
-        prompt = _latest_user_text(messages) if resume_id else full_prompt
+        prompt = (_latest_user_text(messages) if resume_id else full_prompt) + image_note
         new_id = None if resume_id else str(uuid.uuid4())
 
         attempts = int(srv.max_retries) + 1  # type: ignore[attr-defined]
         result: dict[str, Any] = {}
         for attempt in range(attempts):
-            cmd = self._build_cmd(model, prompt, resume_id, new_id)
+            cmd = self._build_cmd(model, prompt, resume_id, new_id, image_dir)
             lock = _session_lock(srv, resume_id) if resume_id else None
             if lock:
                 lock.acquire()
@@ -540,7 +706,7 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
                 srv.sessions.drop(prev_key)  # type: ignore[attr-defined]
                 resume_id = None
                 new_id = str(uuid.uuid4())
-                prompt = full_prompt
+                prompt = full_prompt + image_note
                 continue
             if attempt < attempts - 1:
                 time.sleep(min(2 ** attempt, 8))
@@ -800,6 +966,18 @@ def main() -> None:
             "tool is explicitly allowed.",
         ),
     )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=int(os.getenv("CLAUDE_CODE_MAX_IMAGES", str(DEFAULT_MAX_IMAGES))),
+        help="max image_url attachments per request; 0 disables image support",
+    )
+    parser.add_argument(
+        "--max-image-bytes",
+        type=int,
+        default=int(os.getenv("CLAUDE_CODE_MAX_IMAGE_BYTES", str(DEFAULT_MAX_IMAGE_BYTES))),
+        help="per-image size limit in bytes",
+    )
     parser.add_argument("--api-key", default=os.getenv("CLAUDE_CODE_PROXY_API_KEY", ""))
     parser.add_argument("--timeout", type=int, default=int(os.getenv("CLAUDE_CODE_TIMEOUT", "600")))
     parser.add_argument("--pass-model", action="store_true")
@@ -872,6 +1050,8 @@ def main() -> None:
     server.permission_mode = args.permission_mode  # type: ignore[attr-defined]
     server.max_budget_usd = args.max_budget_usd  # type: ignore[attr-defined]
     server.max_prompt_chars = args.max_prompt_chars  # type: ignore[attr-defined]
+    server.max_images = args.max_images  # type: ignore[attr-defined]
+    server.max_image_bytes = args.max_image_bytes  # type: ignore[attr-defined]
     server.append_system_prompt = args.append_system_prompt  # type: ignore[attr-defined]
     server.api_key = args.api_key  # type: ignore[attr-defined]
     server.stream_output = args.stream_output  # type: ignore[attr-defined]

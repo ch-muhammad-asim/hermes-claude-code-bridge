@@ -24,14 +24,19 @@ or into a slim container.
 from __future__ import annotations
 
 import argparse
+import base64
 import hmac
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import threading
 import time
+import urllib.parse
+import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -85,6 +90,13 @@ DEFAULT_EFFORT = "medium"
 # MCP tools). Lock it down per-deployment with --disallowed-tools
 # / --allowed-tools / --permission-mode if you want a narrower surface.
 DEFAULT_PERMISSION_MODE = "bypassPermissions"
+
+# Images: chat-completions ``image_url`` parts are staged to a per-request temp
+# dir that is handed to the CLI via ``--add-dir`` so its Read tool can view
+# them. 32 MiB fits full-screen Retina screenshots; 0 disables image handling
+# (image parts are then silently dropped, as before).
+DEFAULT_MAX_IMAGES = 4
+DEFAULT_MAX_IMAGE_BYTES = 32 * 1024 * 1024
 DEFAULT_MAX_PROMPT_CHARS = 200_000
 DEFAULT_TIMEOUT = 240
 DEFAULT_MAX_CONCURRENCY = 4
@@ -94,6 +106,130 @@ _REDACT_MARKERS = ("sk-ant-", "Bearer ", "Authorization:", "api_key", "apiKey")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+# ── images ────────────────────────────────────────────────────────────────────
+_IMAGE_EXT = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+    "image/webp": ".webp", "image/gif": ".gif",
+}
+
+
+class ImageExtractionError(ValueError):
+    """A client-supplied image could not be decoded/attached (HTTP 400)."""
+
+
+def _decode_image_url(url: str, index: int) -> tuple[bytes, Optional[str]]:
+    """Return (bytes, mime) for a chat-completions ``image_url`` value."""
+    url = (url or "").strip()
+    if not url:
+        raise ImageExtractionError(f"message contains an empty image_url (image #{index + 1})")
+    if url.startswith("data:"):
+        header, _, payload = url.partition(",")
+        mime = header[5:].split(";")[0].strip().lower() or None
+        try:
+            # Some clients line-wrap base64 payloads; strip whitespace before the
+            # strict decode or a perfectly good image is rejected as corrupt.
+            data = base64.b64decode(re.sub(r"\s+", "", payload), validate=True)
+        except Exception as exc:  # noqa: BLE001
+            raise ImageExtractionError(f"image #{index + 1}: invalid base64 data ({exc})") from exc
+        return data, mime
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "file":
+        path = urllib.request.url2pathname(parsed.path)
+        try:
+            with open(path, "rb") as fh:
+                return fh.read(), None
+        except OSError as exc:
+            raise ImageExtractionError(f"image #{index + 1}: cannot read {path!r} ({exc})") from exc
+    if parsed.scheme in ("http", "https"):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:
+                return resp.read(), (resp.headers.get_content_type() or None)
+        except Exception as exc:  # noqa: BLE001
+            raise ImageExtractionError(f"image #{index + 1}: fetch failed ({exc})") from exc
+    raise ImageExtractionError(
+        f"image #{index + 1}: unsupported image_url scheme {parsed.scheme!r} "
+        "(use a data: URI or an http(s)/file URL)")
+
+
+def extract_images(messages: list[dict[str, Any]], max_images: int,
+                   max_bytes_per_image: int) -> list[tuple[bytes, Optional[str]]]:
+    """Collect ``(data, mime)`` for every ``image_url`` content part in ``messages``."""
+    declared = 0
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image_url":
+                declared += 1
+    if max_images <= 0:
+        if declared:
+            raise ImageExtractionError(
+                "this bridge has image support disabled (--max-images 0); resend text-only")
+        return []
+    if declared > max_images:
+        raise ImageExtractionError(
+            f"too many images: {declared} exceeds the limit of {max_images} per request")
+    found: list[tuple[bytes, Optional[str]]] = []
+    for message in messages or []:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if not (isinstance(item, dict) and item.get("type") == "image_url"):
+                continue
+            inner = item.get("image_url")
+            url = inner.get("url") if isinstance(inner, dict) else inner
+            found.append(_decode_image_url(str(url or ""), len(found)))
+    oversized = [i + 1 for i, image in enumerate(found) if len(image[0]) > max_bytes_per_image]
+    if oversized:
+        raise ImageExtractionError(
+            f"image(s) {oversized} exceed the per-image limit of {max_bytes_per_image // (1024 * 1024)} MiB")
+    return found
+
+
+def stage_image_files(images: list[tuple[bytes, Optional[str]]]) -> tuple[Optional[str], list[str]]:
+    """Write extracted images into a fresh temp dir; return (dir, file paths).
+
+    The dir is handed to the CLI via ``--add-dir`` so the Read tool can view the
+    files; the caller must remove it (cleanup_image_dir) when the request ends.
+    """
+    if not images:
+        return None, []
+    directory = tempfile.mkdtemp(prefix="claude-bridge-images-")
+    paths: list[str] = []
+    for index, (data, mime) in enumerate(images):
+        ext = _IMAGE_EXT.get((mime or "").lower())
+        if not ext:
+            head = data[:12]
+            sniffed = ("png" if head.startswith(b"\x89PNG\r\n\x1a\n")
+                       else "jpg" if head.startswith(b"\xff\xd8")
+                       else "webp" if head[8:12] == b"WEBP"
+                       else "gif" if head.startswith((b"GIF87a", b"GIF89a"))
+                       else "png")
+            ext = f".{sniffed}"
+        path = os.path.join(directory, f"image-{index + 1}{ext}")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        paths.append(path)
+    return directory, paths
+
+
+def cleanup_image_dir(directory: Optional[str]) -> None:
+    if directory:
+        shutil.rmtree(directory, ignore_errors=True)
+
+
+def image_attachment_note(paths: list[str]) -> str:
+    """Prompt suffix telling the CLI to view the staged files with Read."""
+    if not paths:
+        return ""
+    listing = "\n".join(f"  {p}" for p in paths)
+    return ("\n\n[The user attached the following image file(s). "
+            "View each with the Read tool before answering:\n" + listing + "\n]")
+
+
 def _split_csv(value: str) -> list[str]:
     return [part.strip() for part in (value or "").split(",") if part.strip()]
 
@@ -124,7 +260,11 @@ def split_messages(messages: list[dict[str, Any]]) -> tuple[str, str]:
     convo: list[str] = []
     for message in messages or []:
         role = str(message.get("role") or "user").lower()
-        text = _text_from_content(message.get("content")).strip()
+        content = message.get("content")
+        text = _text_from_content(content).strip()
+        if not text and isinstance(content, list) and any(
+                isinstance(part, dict) and part.get("type") == "image_url" for part in content):
+            text = "(see attached image)"  # attachments ride separately via --add-dir
         if not text:
             continue
         if role == "system":
@@ -164,7 +304,7 @@ class ClaudeError(RuntimeError):
 
 
 def build_command(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: str,
-                  output_format: str) -> list[str]:
+                  output_format: str, image_dir: Optional[str] = None) -> list[str]:
     cmd = [
         cfg.claude_bin,
         "--model", model if cfg.pass_model else cfg.default_model,
@@ -175,12 +315,17 @@ def build_command(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: s
     ]
     if output_format == "stream-json":
         cmd.append("--verbose")  # required by the CLI for stream-json with -p
+    if image_dir:
+        cmd += ["--add-dir", image_dir]
     if cfg.max_budget_usd:
         cmd += ["--max-budget-usd", str(cfg.max_budget_usd)]
     # A bare "*" is not a valid Claude Code *allow* rule; "allow all" is expressed
     # via --permission-mode bypassPermissions, so skip --allowedTools for the * sentinel.
     if cfg.allowed_tools and cfg.allowed_tools != ["*"]:
-        cmd += ["--allowedTools", ",".join(cfg.allowed_tools)]
+        allowed = list(cfg.allowed_tools)
+        if image_dir and "Read" not in allowed:
+            allowed.append("Read")  # staged images are useless if Read is blocked
+        cmd += ["--allowedTools", ",".join(allowed)]
     if cfg.disallowed_tools:
         cmd += ["--disallowedTools", ",".join(cfg.disallowed_tools)]
     appended = "\n\n".join(p for p in (cfg.append_system_prompt, system_prompt) if p)
@@ -224,9 +369,10 @@ def _kill(proc: subprocess.Popen) -> None:
         pass
 
 
-def run_blocking(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: str) -> dict[str, Any]:
+def run_blocking(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: str,
+                 image_dir: Optional[str] = None) -> dict[str, Any]:
     """Run claude to completion in JSON mode; return {'text','usage','cost_usd'}."""
-    cmd = build_command(cfg, model, prompt, system_prompt, "json")
+    cmd = build_command(cfg, model, prompt, system_prompt, "json", image_dir)
     proc = _popen(cmd, cfg)
     try:
         out, err = proc.communicate(timeout=cfg.timeout_seconds)
@@ -249,13 +395,14 @@ def run_blocking(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: st
     return {"text": out.strip(), "usage": {}, "cost_usd": None}
 
 
-def run_streaming(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: str) -> Iterator[dict[str, Any]]:
+def run_streaming(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: str,
+                  image_dir: Optional[str] = None) -> Iterator[dict[str, Any]]:
     """Run claude in stream-json mode; yield {'delta': str} then {'done', 'usage', 'cost_usd'}.
 
     stream-json emits one JSON object per line: system/init, assistant message
     events, and a final result event. We forward assistant text as deltas.
     """
-    cmd = build_command(cfg, model, prompt, system_prompt, "stream-json")
+    cmd = build_command(cfg, model, prompt, system_prompt, "stream-json", image_dir)
     proc = _popen(cmd, cfg)
     deadline = time.time() + cfg.timeout_seconds
     usage: dict[str, Any] = {}
@@ -312,6 +459,8 @@ class BridgeConfig:
         self.disallowed_tools = _split_csv(args.disallowed_tools)
         self.append_system_prompt = args.append_system_prompt
         self.max_prompt_chars = args.max_prompt_chars
+        self.max_images = args.max_images
+        self.max_image_bytes = args.max_image_bytes
         self.timeout_seconds = args.timeout
         self.pass_model = args.pass_model
         self.api_key = args.api_key
@@ -456,24 +605,35 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(413, {"error": {"message":
                 f"prompt too large: {len(prompt)} chars exceeds {self.cfg.max_prompt_chars}"}})
             return
+        try:
+            images = extract_images(request.get("messages") or [],
+                                    self.cfg.max_images, self.cfg.max_image_bytes)
+        except ImageExtractionError as exc:
+            self._send_json(400, {"error": {"message": str(exc)}})
+            return
+        image_dir, image_paths = stage_image_files(images)
+        prompt += image_attachment_note(image_paths)
 
         # Concurrency slot — bound the number of live claude subprocesses.
         if not self.server.slot.acquire(timeout=self.server.queue_wait):  # type: ignore[attr-defined]
             self.server.metrics.rejected_busy += 1  # type: ignore[attr-defined]
+            cleanup_image_dir(image_dir)  # staged but never handed to the CLI
             self._send_json(429, {"error": {"message": "bridge busy: too many concurrent requests"}})
             return
         try:
             if request.get("stream") is True:
-                self._handle_stream(model, prompt, system_prompt)
+                self._handle_stream(model, prompt, system_prompt, image_dir)
             else:
-                self._handle_blocking(model, prompt, system_prompt)
+                self._handle_blocking(model, prompt, system_prompt, image_dir)
         finally:
             self.server.slot.release()  # type: ignore[attr-defined]
+            cleanup_image_dir(image_dir)
 
-    def _handle_blocking(self, model: str, prompt: str, system_prompt: str) -> None:
+    def _handle_blocking(self, model: str, prompt: str, system_prompt: str,
+                         image_dir: Optional[str] = None) -> None:
         started = time.time()
         try:
-            res = run_blocking(self.cfg, model, prompt, system_prompt)
+            res = run_blocking(self.cfg, model, prompt, system_prompt, image_dir)
         except ClaudeError as exc:
             self.server.metrics.record(error=True)  # type: ignore[attr-defined]
             self._send_json(exc.exit_code if exc.exit_code in (502, 504) else 502,
@@ -492,7 +652,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "usage": usage,
         })
 
-    def _handle_stream(self, model: str, prompt: str, system_prompt: str) -> None:
+    def _handle_stream(self, model: str, prompt: str, system_prompt: str,
+                       image_dir: Optional[str] = None) -> None:
         completion_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
         started = time.time()
@@ -510,7 +671,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.wfile.write(frame({"role": "assistant"}))
             usage: dict[str, Any] = {}
             cost = None
-            for event in run_streaming(self.cfg, model, prompt, system_prompt):
+            for event in run_streaming(self.cfg, model, prompt, system_prompt, image_dir):
                 if "delta" in event:
                     self.wfile.write(frame({"content": event["delta"]}))
                     self.wfile.flush()
@@ -585,6 +746,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-budget-usd", default=os.getenv("CLAUDE_CODE_MAX_BUDGET_USD", ""))
     p.add_argument("--max-prompt-chars", type=int,
                    default=int(os.getenv("CLAUDE_CODE_MAX_PROMPT_CHARS", str(DEFAULT_MAX_PROMPT_CHARS))))
+    p.add_argument("--max-images", type=int,
+                   default=int(os.getenv("CLAUDE_CODE_MAX_IMAGES", str(DEFAULT_MAX_IMAGES))),
+                   help="max image_url attachments per request; 0 disables image support")
+    p.add_argument("--max-image-bytes", type=int,
+                   default=int(os.getenv("CLAUDE_CODE_MAX_IMAGE_BYTES", str(DEFAULT_MAX_IMAGE_BYTES))),
+                   help="per-image size limit in bytes")
     p.add_argument("--append-system-prompt", default=os.getenv(
         "CLAUDE_CODE_APPEND_SYSTEM_PROMPT",
         "You are Claude Code, invoked by Hermes through a local bridge. You may use any "
@@ -672,6 +839,37 @@ def _selfcheck() -> None:
                                                      "--models", "claude-sonnet-5,claude-opus-4-8"])).models
     assert models == ["claude-sonnet-5", "claude-opus-4-8"], models  # default first, de-duped
     assert DEFAULT_MODEL in BridgeConfig(build_parser().parse_args([])).models
+    # image plumbing: decode, stage, placeholder, limits
+    raw_png = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQAB"
+        "h6FO1AAAAABJRU5ErkJggg==")
+    image_only = [{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,"
+         + base64.b64encode(raw_png).decode()}}]}]
+    imgs = extract_images(image_only, DEFAULT_MAX_IMAGES, DEFAULT_MAX_IMAGE_BYTES)
+    assert imgs and imgs[0][0] == raw_png and imgs[0][1] == "image/png"
+    d, paths = stage_image_files(imgs)
+    try:
+        assert paths and paths[0].endswith(".png") and open(paths[0], "rb").read() == raw_png
+        assert "--add-dir" in build_command(BridgeConfig(build_parser().parse_args([])),
+                                            "claude-opus-4-8", "p", "", "json", d)
+        assert "Read the" not in image_attachment_note([]) and paths[0] in image_attachment_note(paths)
+    finally:
+        cleanup_image_dir(d)
+    assert not os.path.exists(d)
+    p2, _ = split_messages(image_only)
+    assert p2 == "USER:\n(see attached image)", repr(p2)
+    try:
+        extract_images(image_only * 5, DEFAULT_MAX_IMAGES, DEFAULT_MAX_IMAGE_BYTES)
+        raise SystemExit("selfcheck: over-limit image count was accepted")
+    except ImageExtractionError:
+        pass
+    try:
+        extract_images(image_only, DEFAULT_MAX_IMAGES, 0)
+        raise SystemExit("selfcheck: oversized image was accepted")
+    except ImageExtractionError:
+        pass
+    assert extract_images([], 0, DEFAULT_MAX_IMAGE_BYTES) == []
     print("selfcheck ok")
 
 

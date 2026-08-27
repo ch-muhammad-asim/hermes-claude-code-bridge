@@ -543,10 +543,12 @@ curl -sS http://127.0.0.1:18181/v1/chat/completions -H 'content-type: applicatio
 Add more roots as a comma-separated list — a second client's cache, a shared skills directory — and
 mount each at its host path.
 
-> **Inline base64 images are still dropped.** A request carrying
-> `{"type": "image_url", "image_url": {"url": "data:image/png;base64,…"}}` loses that part: the
-> bridge flattens message content to text and keeps only `type: "text"` items. Path-based images
-> work; embedded ones do not. Point such a client at a file path instead.
+> **Inline base64 images are supported.** A request carrying
+> `{"type": "image_url", "image_url": {"url": "data:image/png;base64,…"}}` is staged to a
+> per-request temp dir handed to the CLI via `--add-dir`, and the prompt tells Claude to view it
+> with the Read tool. `http(s)` and `file` URLs work too. Limits: `CLAUDE_CODE_MAX_IMAGES`
+> (default 4 per request, `0` disables) and `CLAUDE_CODE_MAX_IMAGE_BYTES` (default 32 MiB —
+> fits Retina screenshots). Path-based images via `CLAUDE_CODE_ADDITIONAL_DIRS` keep working.
 
 ---
 
