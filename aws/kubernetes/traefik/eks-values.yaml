@@ -1,0 +1,123 @@
+# Traefik Helm values for Amazon EKS.
+# Chart: traefik/traefik v41.3.0 (see ./README.md; keep this in sync with CHART_VERSION)
+
+deployment:
+  kind: Deployment
+  replicas: 2
+  podAnnotations:
+    prometheus.io/port: "9100"
+    prometheus.io/scrape: "true"
+  podLabels:
+    eks: traefik
+
+# Keep Traefik off Karpenter-managed capacity: it is the ingress path, and a
+# consolidation event should never be able to drain the whole data plane
+# entrance at once.
+nodeSelector:
+  workload-type: system
+
+ingressClass:
+  enabled: true
+  isDefaultClass: false
+  name: traefik-external
+
+ingressRoute:
+  dashboard:
+    enabled: false
+
+api:
+  dashboard: true
+  insecure: false
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+
+accessLog:
+  enabled: true
+  format: json
+  fields:
+    defaultMode: keep
+    headers:
+      defaultMode: drop
+
+metrics:
+  prometheus:
+    entryPoint: metrics
+    addEntryPointsLabels: false
+    addServicesLabels: false
+
+providers:
+  kubernetesCRD:
+    enabled: true
+    ingressClass: traefik-external
+  kubernetesIngress:
+    enabled: true
+    ingressClass: traefik-external
+
+###############################################################################
+# AWS specifics - this is what differs from the GKE values
+#
+# The Service is fronted by a Network Load Balancer, provisioned by the AWS Load
+# Balancer Controller through its service mutator webhook. NLB rather than ALB
+# because Traefik does its own L7 routing, TLS termination and middleware - an
+# ALB in front would be a second, redundant L7 hop.
+###############################################################################
+service:
+  enabled: true
+  type: LoadBalancer
+  annotations:
+    # "external" hands the Service to the AWS Load Balancer Controller instead
+    # of the legacy in-tree cloud provider.
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    # ip target type registers pod IPs directly, so traffic does not hop via a
+    # NodePort on an arbitrary node.
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: HTTP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /ping
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "9000"
+    service.beta.kubernetes.io/aws-load-balancer-additional-resource-tags: Environment=dev,Blueprint=cloudgeeks-eks-dev
+
+ports:
+  web:
+    port: 8000
+    expose:
+      default: true
+    exposedPort: 80
+    protocol: TCP
+  websecure:
+    port: 8443
+    expose:
+      default: true
+    exposedPort: 443
+    protocol: TCP
+    # In chart v41 the entrypoint TLS switch lives under http.tls, not directly
+    # on the port. The chart's values schema rejects the old placement.
+    http:
+      tls:
+        enabled: true
+  # The traefik entrypoint serves /ping, which is what the NLB health check
+  # targets. It is enabled by the chart and must not be exposed publicly.
+  traefik:
+    port: 9000
+    expose:
+      default: false
+  metrics:
+    port: 9100
+    expose:
+      default: false
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1

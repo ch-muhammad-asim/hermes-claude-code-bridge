@@ -1,0 +1,91 @@
+###############################################################################
+# Load generator
+#
+# Drives the scaling chain:
+#
+#   POST /ConsumeCPU  ->  pods burn CPU  ->  HPA sees >50% utilisation
+#                     ->  HPA adds pods  ->  pods go Pending (no room)
+#                     ->  Karpenter provisions nodes
+#
+# Each request asks one pod (whichever the Service picks) to burn 300m for 30s.
+# Firing 20 of them every 15 seconds keeps every replica saturated as the
+# deployment scales out, so the HPA does not immediately scale back down.
+#
+# It runs as a Job so the test has a defined end: when it finishes, the load
+# stops, the HPA scales in and Karpenter consolidates the nodes away.
+###############################################################################
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: loadgen
+  namespace: load-testing
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app: loadgen
+    spec:
+      restartPolicy: Never
+      # Keep the generator on the system node group so it never competes with
+      # the workload it is measuring, and is never itself a reason to scale.
+      nodeSelector:
+        workload-type: system
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: loadgen
+          image: curlimages/curl:8.11.1
+          env:
+            # Total duration of the load phase.
+            - name: DURATION_SECONDS
+              value: "240"
+            # Concurrent requests per wave.
+            - name: CONCURRENCY
+              value: "10"
+            # CPU each request asks a pod to burn, and for how long.
+            - name: MILLICORES
+              value: "300"
+            - name: BURN_SECONDS
+              value: "30"
+            - name: TARGET
+              value: "http://cpu-burner.load-testing.svc.cluster.local:8080/ConsumeCPU"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              END=$(( $(date +%s) + DURATION_SECONDS ))
+              WAVE=0
+              echo "load phase: ${DURATION_SECONDS}s, ${CONCURRENCY} requests per wave, ${MILLICORES}m for ${BURN_SECONDS}s each"
+              while [ "$(date +%s)" -lt "$END" ]; do
+                WAVE=$(( WAVE + 1 ))
+                i=0
+                while [ "$i" -lt "$CONCURRENCY" ]; do
+                  curl -sS -m 10 -o /dev/null \
+                    -d "millicores=${MILLICORES}&durationSec=${BURN_SECONDS}" \
+                    -X POST "$TARGET" || true &
+                  i=$(( i + 1 ))
+                done
+                wait
+                echo "wave ${WAVE} dispatched at $(date -u +%H:%M:%S)"
+                sleep 15
+              done
+              echo "load phase complete"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

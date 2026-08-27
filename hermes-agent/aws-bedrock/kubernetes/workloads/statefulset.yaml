@@ -1,0 +1,589 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hermes-agent
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: devops-agent
+spec:
+  serviceName: hermes-agent
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermes-agent
+        app.kubernetes.io/component: runtime
+        app.kubernetes.io/part-of: devops-agent
+    spec:
+      serviceAccountName: hermes-agent
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 10000
+      volumes:
+        - name: bedrock-bridge-files
+          configMap:
+            name: hermes-agent-bedrock-bridge
+            defaultMode: 0755
+        - name: github-cli
+          configMap:
+            name: hermes-agent-github-cli
+            defaultMode: 0755
+        - name: github-app-credentials
+          secret:
+            secretName: hermes-agent-github-app
+            defaultMode: 0400
+            # Optional so the stack comes up on a cluster with no GitHub App
+            # configured (a sandbox, or a first deploy). Without this the pod is
+            # stuck in ContainerCreating on a missing Secret and never starts. With
+            # it, `gh` is simply unauthenticated until the Secret is created and the
+            # StatefulSet is rolled.
+            optional: true
+        - name: runtime-identity
+          configMap:
+            name: hermes-agent-runtime-identity
+            defaultMode: 0644
+        - name: declarative-skills
+          configMap:
+            name: hermes-agent-declarative-skills
+            defaultMode: 0644
+      initContainers:
+        - name: init-runtime-tools
+          image: nousresearch/hermes-agent:v2026.8.3
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          env:
+            - name: KUBECTL_STABLE_URL
+              value: https://dl.k8s.io/release/stable.txt
+            - name: KUBECTL_DEST
+              value: /opt/data/bin/kubectl
+            # GitHub CLI replaces the github-sre-readonly MCP server. The read-only
+            # `gh` wrapper (mounted at /github-cli/gh) execs this binary. Always the
+            # latest gh release, resolved and checksum-verified at install time.
+            - name: GH_RELEASES_API
+              value: https://api.github.com/repos/cli/cli/releases/latest
+            - name: GH_DEST
+              value: /opt/data/gh/bin/gh
+          args:
+            - |
+              set -eu
+              mkdir -p /opt/data/bin "$(dirname "$GH_DEST")"
+
+              kubectl_version="$(curl -fsSL --retry 3 --retry-delay 2 "$KUBECTL_STABLE_URL")"
+              case "$kubectl_version" in
+                v*) ;;
+                *) echo "Unexpected kubectl stable version: $kubectl_version" >&2; exit 1 ;;
+              esac
+              tmp_kubectl="${KUBECTL_DEST}.tmp.$$"
+              curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_kubectl" \
+                "https://dl.k8s.io/release/${kubectl_version}/bin/linux/amd64/kubectl"
+              chmod 0755 "$tmp_kubectl"
+              "$tmp_kubectl" version --client=true 2>/dev/null | head -1
+              mv -f "$tmp_kubectl" "$KUBECTL_DEST"
+
+              tmp_dir="$(mktemp -d)"
+              trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+              gh_tag="$(curl -fsSL --retry 3 --retry-delay 2 "$GH_RELEASES_API" \
+                | python3 -c 'import sys, json; print(json.load(sys.stdin)["tag_name"])')"
+              case "$gh_tag" in
+                v*) ;;
+                *) echo "Unexpected gh release tag: $gh_tag" >&2; exit 1 ;;
+              esac
+              gh_ver="${gh_tag#v}"
+              gh_tgz="gh_${gh_ver}_linux_amd64.tar.gz"
+              gh_base="https://github.com/cli/cli/releases/download/${gh_tag}"
+              curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_dir/$gh_tgz" "$gh_base/$gh_tgz"
+              # Verify the tarball against GitHub's published checksums for this release.
+              curl -fsSL --retry 3 --retry-delay 2 -o "$tmp_dir/checksums.txt" \
+                "$gh_base/gh_${gh_ver}_checksums.txt"
+              ( cd "$tmp_dir" && grep " ${gh_tgz}\$" checksums.txt | sha256sum -c - )
+              tar -xzf "$tmp_dir/$gh_tgz" -C "$tmp_dir"
+              install -m 0755 "$tmp_dir/gh_${gh_ver}_linux_amd64/bin/gh" "$GH_DEST"
+              "$GH_DEST" --version
+              chown -R 10000:10000 /opt/data/bin /opt/data/gh
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+        - name: init-hermes-config
+          image: nousresearch/hermes-agent:v2026.8.3
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          env:
+            - name: BEDROCK_CLAUDE_BRIDGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-agent-secrets
+                  key: BEDROCK_CLAUDE_BRIDGE_API_KEY
+            - name: BEDROCK_CLAUDE_MODEL
+              value: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+            # Leave empty to keep Slack off. Set to a channel id (C…) to enable the
+            # Hermes Slack bot and its home channel; the init script below only
+            # writes the platforms.slack block when this is non-empty, so a blank
+            # value cannot produce a half-configured Slack integration.
+            - name: SLACK_HOME_CHANNEL
+              value: ""
+            - name: SLACK_HOME_CHANNEL_NAME
+              value: devops
+            - name: SLACK_HOME_CHANNEL_THREAD_ID
+              value: ""
+          envFrom:
+            - secretRef:
+                name: hermes-agent-secrets
+          args:
+            - |
+              set -eu
+              mkdir -p \
+                /opt/data \
+                /opt/data/image_cache \
+                /opt/data/skills \
+                /opt/data/memory \
+                /opt/data/.hermes/memory
+              chmod 0770 /opt/data/image_cache /opt/data/skills /opt/data/memory /opt/data/.hermes/memory
+              cp /runtime-identity/SOUL.md /opt/data/SOUL.md
+              # Install the version-controlled skills declaratively (Git -> ConfigMap -> PVC).
+              mkdir -p /opt/data/skills/lead-devops-sre /opt/data/skills/sre-pod-remediation
+              cp /declarative-skills/lead-devops-sre.SKILL.md /opt/data/skills/lead-devops-sre/SKILL.md
+              cp /declarative-skills/sre-pod-remediation.SKILL.md /opt/data/skills/sre-pod-remediation/SKILL.md
+              # Block-installs hook: a pre_tool_call shell hook
+              # that rejects package-install / pipe-to-shell commands before they run.
+              # allow_lazy_installs=false only disables Hermes' own installer — the
+              # terminal tool could still run uv (verified live); this closes it.
+              mkdir -p /opt/data/hooks
+              cat > /opt/data/hooks/block-installs.py <<'HOOK'
+              #!/usr/bin/env python3
+              import json, re, sys
+              try:
+                  payload = json.load(sys.stdin)
+              except Exception:
+                  sys.exit(0)
+              cmd = str((payload.get("tool_input") or {}).get("command", ""))
+              PATTERNS = [
+                  r"\buv\b", r"\bpip3?\b", r"\bpython3?\s+-m\s+pip\b",
+                  r"\bapt(-get|-cache)?\b", r"\bdpkg\b", r"\bapk\b", r"\byum\b", r"\bdnf\b",
+                  r"\bnpm\b", r"\bpnpm\b", r"\byarn\b", r"\bnpx\b", r"\bgem\s+install\b",
+                  r"\bcargo\s+install\b", r"\bgo\s+install\b", r"\bconda\b", r"\beasy_install\b",
+                  r"\b(curl|wget)\b[^|;&]*\|\s*(ba|z|da)?sh\b",
+              ]
+              for p in PATTERNS:
+                  if re.search(p, cmd, re.IGNORECASE):
+                      print(json.dumps({
+                          "decision": "block",
+                          "reason": "Package installation and pipe-to-shell execution are disabled on this agent. Use only the pre-installed tools (kubectl, gh).",
+                      }))
+                      break
+              HOOK
+              chmod 0755 /opt/data/hooks/block-installs.py
+              touch /opt/data/.env
+              /opt/hermes/.venv/bin/python - <<'PYENV'
+              from pathlib import Path
+              import os
+
+              env_path = Path("/opt/data/.env")
+              managed = {
+                  "SLACK_HOME_CHANNEL": os.environ.get("SLACK_HOME_CHANNEL", ""),
+                  "SLACK_HOME_CHANNEL_NAME": os.environ.get("SLACK_HOME_CHANNEL_NAME", "devops"),
+                  "SLACK_HOME_CHANNEL_THREAD_ID": os.environ.get("SLACK_HOME_CHANNEL_THREAD_ID", ""),
+              }
+              lines = []
+              if env_path.exists():
+                  for line in env_path.read_text().splitlines():
+                      key = line.split("=", 1)[0].strip() if "=" in line else ""
+                      if key not in managed:
+                          lines.append(line)
+              lines.extend(f"{key}={value}" for key, value in managed.items())
+              env_path.write_text("\n".join(lines).rstrip() + "\n")
+              PYENV
+              export HERMES_HOME=/opt/data
+              # Cost + focus: strip ALL bundled skills, keeping only the local
+              # lead-devops-sre and sre-pod-remediation skills installed above. Writes
+              # /opt/data/.no-bundled-skills so nothing re-seeds; idempotent across
+              # restarts. Fewer skills = smaller system prompt = cheaper, and a
+              # focused DevOps agent.
+              /opt/hermes/.venv/bin/hermes skills opt-out --remove --yes 2>&1 | tail -1 || true
+              /opt/hermes/.venv/bin/python - <<'PY'
+              from pathlib import Path
+              import os
+              import yaml
+
+              p = Path("/opt/data/config.yaml")
+              data = yaml.safe_load(p.read_text()) if p.exists() else {}
+              data = data or {}
+
+              model_id = os.environ.get(
+                  "BEDROCK_CLAUDE_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+              )
+
+              data["model"] = {
+                  "default": model_id,
+                  "provider": "bedrock-claude-bridge",
+                  "base_url": "http://127.0.0.1:18182/v1",
+                  "api_mode": "chat_completions",
+                  # Pin the window: Hermes can't probe context length from the custom
+                  # bridge ("probe-down" defaults to 256k, which would OVERSTATE
+                  # Sonnet 4.5's 200k on Bedrock and get requests rejected mid-thread).
+                  # Sonnet 4.5's 1M window is a separate opt-in beta, not the default.
+                  "context_length": 200000,
+              }
+
+              providers = data.setdefault("providers", {})
+              providers["bedrock-claude-bridge"] = {
+                  "name": "Bedrock Claude Bridge",
+                  "base_url": "http://127.0.0.1:18182/v1",
+                  "api_key": os.environ["BEDROCK_CLAUDE_BRIDGE_API_KEY"],
+                  "default_model": model_id,
+                  "transport": "chat_completions",
+              }
+              # Drop the Vertex providers if a PVC carried over from a GCP deployment,
+              # so the agent can't fall back to a bridge that is not running here.
+              providers.pop("vertex-claude-bridge", None)
+              providers.pop("vertex-gemini-bridge", None)
+
+              slack_home_channel = os.environ.get("SLACK_HOME_CHANNEL", "").strip()
+              if slack_home_channel:
+                  platforms = data.setdefault("platforms", {})
+                  slack_platform = platforms.setdefault("slack", {})
+                  slack_platform["enabled"] = True
+                  slack_platform["home_channel"] = {
+                      "platform": "slack",
+                      "chat_id": slack_home_channel,
+                      "name": os.environ.get("SLACK_HOME_CHANNEL_NAME", "devops"),
+                      "thread_id": os.environ.get("SLACK_HOME_CHANNEL_THREAD_ID") or None,
+                  }
+
+              tools = data.setdefault("tools", {})
+              tool_search = tools.setdefault("tool_search", {})
+              tool_search["enabled"] = False
+
+              mcp_servers = data.setdefault("mcp_servers", {})
+              if not isinstance(mcp_servers, dict):
+                  mcp_servers = {}
+                  data["mcp_servers"] = mcp_servers
+
+              # github-sre-readonly MCP is replaced by the read-only `gh` CLI; drop any
+              # stale entry persisted in config.yaml from a previous deployment.
+              mcp_servers.pop("github-sre-readonly", None)
+              # The GCP observability MCPs have no AWS equivalent in this deployment
+              # (CloudWatch is read through the read-only kubectl + the AWS console),
+              # and their loopback token proxy is not part of this pod. Remove them so
+              # a carried-over config.yaml can't advertise tools that will always fail.
+              for stale in (
+                  "gcp-logging-sre-readonly",
+                  "gcp-monitoring-sre-readonly",
+                  "gcp-trace-sre-readonly",
+              ):
+                  mcp_servers.pop(stale, None)
+
+              # Playwright MCP — headless Chromium for live-app diagnosis. Drives the app
+              # the way a real browser does (runs the page's JS), so the agent sees
+              # client-side console errors, failed XHRs, the auth/redirect flow, and the
+              # rendered DOM — things `curl` can't reach. Isolated, headless profile; the
+              # browser only reads pages, it never mutates cluster or cloud resources.
+              mcp_servers["playwright"] = {
+                  "command": "npx",
+                  "args": ["-y", "@playwright/mcp@latest", "--headless", "--isolated"],
+                  "timeout": 120,
+                  "connect_timeout": 60,
+                  "tools": {
+                      "include": [
+                          "browser_navigate",
+                          "browser_snapshot",
+                          "browser_click",
+                          "browser_type",
+                          "browser_fill_form",
+                          "browser_console_messages",
+                          "browser_network_requests",
+                          "browser_take_screenshot",
+                          "browser_evaluate",
+                          "browser_wait_for",
+                      ],
+                  },
+              }
+
+              # Context compaction: trigger at 85% of the window instead of the
+              # Hermes default of 50%, so the agent uses more context before
+              # summarizing. Other compression knobs keep their tuned defaults.
+              compression = data.setdefault("compression", {})
+              compression["threshold"] = 0.85
+
+              # I/O limits sized for Sonnet 4.5's 200k window. These are deliberately
+              # LOWER than the Vertex deployment's (150000 / 5000 / 300000), which were
+              # tuned for a 1M-context model: at 200k, a single 150KB log dump is ~40k
+              # tokens and would trigger compaction on its own. Still well above the
+              # Hermes defaults, so whole manifests and useful log slices fit.
+              tool_output = data.setdefault("tool_output", {})
+              tool_output["max_bytes"] = 60000
+              tool_output["max_lines"] = 2500
+              tool_output["max_line_length"] = 2000
+              data["file_read_max_chars"] = 120000
+              data["context_file_max_chars"] = 20000  # cap identity/context files; clears the empty-section warning
+
+              # Security hardening: the agent may use ONLY the
+              # tools we bake in via the init containers (kubectl, gh) — it must not
+              # execute arbitrary code or download/install any package or binary.
+              # - disable the code_execution toolset (arbitrary Python / execute_code)
+              # - disable lazy installs (no on-the-fly package/binary installation)
+              agent_cfg = data.setdefault("agent", {})
+              _disabled = set(agent_cfg.get("disabled_toolsets") or [])
+              _disabled.add("code_execution")
+              agent_cfg["disabled_toolsets"] = sorted(_disabled)
+              security_cfg = data.setdefault("security", {})
+              security_cfg["allow_lazy_installs"] = False
+
+              # Cost optimization: cap the agent loop and hard-stop runaway
+              # tool-failure loops (warn/hard-stop thresholds keep Hermes defaults).
+              # Prompt caching + retries stay tuned in the bridge. max_turns matters
+              # more here than on Vertex: an AI sandbox caps the whole lab at 20,000
+              # Bedrock tokens, so a runaway loop is not just expensive, it ends the lab.
+              agent_cfg["max_turns"] = 60
+              tlg = data.setdefault("tool_loop_guardrails", {})
+              tlg["hard_stop_enabled"] = True
+
+              # Register the block-installs pre_tool_call hook (script written above
+              # by this init container) and auto-accept it — the gateway is non-TTY.
+              data["hooks"] = {
+                  "pre_tool_call": [
+                      {"matcher": "terminal", "command": "/opt/data/hooks/block-installs.py", "timeout": 10},
+                  ],
+              }
+              data["hooks_auto_accept"] = True
+
+              p.write_text(yaml.safe_dump(data, sort_keys=False))
+              PY
+              chown -R 10000:10000 /opt/data
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: runtime-identity
+              mountPath: /runtime-identity
+              readOnly: true
+            - name: declarative-skills
+              mountPath: /declarative-skills
+              readOnly: true
+      containers:
+        - name: hermes
+          image: nousresearch/hermes-agent:v2026.8.3
+          imagePullPolicy: IfNotPresent
+          args: ["gateway", "run"]
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/sh
+                  - -lc
+                  - ln -sf /opt/data/bin/kubectl /usr/local/bin/kubectl || true; ln -sf /github-cli/gh /usr/local/bin/gh || true; rm -f /usr/local/bin/uv || true
+          ports:
+            - name: api
+              containerPort: 8642
+            - name: dashboard
+              containerPort: 9119
+          env:
+            - name: BEDROCK_CLAUDE_BRIDGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-agent-secrets
+                  key: BEDROCK_CLAUDE_BRIDGE_API_KEY
+            # Optional so the pod starts before a GitHub App exists. `gh` then runs
+            # unauthenticated until the Secret is created and the pod is rolled.
+            - name: GITHUB_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-agent-github-app
+                  key: app-id
+                  optional: true
+            - name: GITHUB_APP_INSTALLATION_ID
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-agent-github-app
+                  key: installation-id
+                  optional: true
+            - name: GITHUB_APP_PRIVATE_KEY_FILE
+              value: /var/run/secrets/hermes-github-app/private-key.pem
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_SKILLS_DIR
+              value: /opt/data/skills
+            - name: HERMES_MEMORY_DIR
+              value: /opt/data/memory
+            - name: PATH
+              value: /opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: "0.0.0.0"
+            - name: API_SERVER_PORT
+              value: "8642"
+            - name: HERMES_DASHBOARD
+              value: "1"
+            - name: HERMES_DASHBOARD_HOST
+              value: "0.0.0.0"
+            - name: HERMES_DASHBOARD_PORT
+              value: "9119"
+            - name: HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS
+              value: "43200"
+            - name: SLACK_HOME_CHANNEL
+              value: ""
+            - name: SLACK_HOME_CHANNEL_NAME
+              value: devops
+            - name: SLACK_HOME_CHANNEL_THREAD_ID
+              value: ""
+            - name: HERMES_TUI_PROVIDER
+              value: bedrock-claude-bridge
+            - name: HERMES_INFERENCE_PROVIDER
+              value: bedrock-claude-bridge
+          envFrom:
+            - secretRef:
+                name: hermes-agent-secrets
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: github-cli
+              mountPath: /github-cli/gh
+              subPath: gh
+              readOnly: true
+            - name: github-app-credentials
+              mountPath: /var/run/secrets/hermes-github-app
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            # Sized for the sandbox's t3.medium ceiling: 2 vCPU / 4Gi per node with
+            # ~1930m CPU and ~3.4Gi allocatable, shared with kube-system, Traefik and
+            # the load-balancer controller. Requests stay small enough to schedule;
+            # limits stay generous so the agent can still burst during an investigation.
+            requests:
+              cpu: "300m"
+              memory: "1Gi"
+            limits:
+              cpu: "1500m"
+              memory: "2560Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - NET_RAW
+                - NET_ADMIN
+        # Claude Sonnet 4.5 on Amazon Bedrock. Like the Vertex Claude sidecar this
+        # translates chat-completions <-> Anthropic Messages, preserving the full tool
+        # loop; unlike it, transport is boto3 InvokeModel with SigV4 and the version
+        # string is bedrock-2023-05-31. Credentials come from EKS Pod Identity, so
+        # there is no AWS key in the manifest or in any Secret.
+        - name: bedrock-claude-bridge
+          image: python:3.13-slim
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          env:
+            - name: BEDROCK_CLAUDE_BRIDGE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: hermes-agent-secrets
+                  key: BEDROCK_CLAUDE_BRIDGE_API_KEY
+            # boto3 needs the region explicitly: unlike GCP's metadata server, the Pod
+            # Identity credential provider supplies credentials but not a default
+            # region, so an unset AWS_REGION fails with NoRegionError at startup.
+            - name: AWS_REGION
+              value: us-east-1
+            # Claude Sonnet 4.5 is INFERENCE_PROFILE-only on Bedrock — a bare
+            # anthropic.claude-sonnet-4-5-* id is rejected with a ValidationException.
+            # The "us." profile is cross-region; keep it aligned with the IAM policy in
+            # aws/modules/hermes-bedrock-iam, which authorizes the underlying
+            # foundation model in every region the profile can route to.
+            - name: ANTHROPIC_MODEL
+              value: us.anthropic.claude-sonnet-4-5-20250929-v1:0
+            - name: BEDROCK_CLAUDE_MAX_TOKENS
+              value: "8192"
+            - name: BEDROCK_CLAUDE_TIMEOUT_SECONDS
+              value: "300"
+            # Retries smooth transient Bedrock ThrottlingException / 5xx so they don't
+            # surface to the agent. Bedrock throttles on account TPM/RPM quota, which a
+            # shared sandbox account hits far more often than a dedicated project.
+            - name: BEDROCK_CLAUDE_MAX_RETRIES
+              value: "2"
+            # Bedrock has no automatic prompt caching, so the bridge sets
+            # cache_control breakpoints explicitly. 1h TTL survives the multi-minute
+            # gaps in an interactive thread; kill-switch is "0".
+            - name: BEDROCK_CLAUDE_PROMPT_CACHING
+              value: "1"
+            - name: BEDROCK_CLAUDE_CACHE_TTL
+              value: 1h
+          envFrom:
+            - secretRef:
+                name: hermes-agent-secrets
+          args:
+            - |
+              set -eu
+              python3 -m pip install --no-cache-dir -r /app/requirements.txt
+              exec python3 /app/bedrock_claude_bridge.py \
+                --host 0.0.0.0 \
+                --port 18182
+          ports:
+            - name: bedrock-bridge
+              containerPort: 18182
+          volumeMounts:
+            - name: bedrock-bridge-files
+              mountPath: /app/bedrock_claude_bridge.py
+              subPath: bedrock_claude_bridge.py
+            - name: bedrock-bridge-files
+              mountPath: /app/requirements.txt
+              subPath: requirements.txt
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -lc
+                - |
+                  python3 - <<'PY'
+                  import os
+                  import urllib.request
+
+                  req = urllib.request.Request("http://127.0.0.1:18182/health")
+                  req.add_header("Authorization", f"Bearer {os.environ['BEDROCK_CLAUDE_BRIDGE_API_KEY']}")
+                  with urllib.request.urlopen(req, timeout=3) as response:
+                      raise SystemExit(0 if response.status == 200 else 1)
+                  PY
+            # 30s, not 15s: the container pip-installs boto3 before the server binds.
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - NET_RAW
+                - NET_ADMIN
+  volumeClaimTemplates:
+    - metadata:
+        name: agent-state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # gp3, declared in ../storage/storageclass.yaml. NOT GKE's standard-rwo,
+        # which does not exist on EKS and would leave the PVC Pending forever.
+        storageClassName: gp3
+        resources:
+          requests:
+            storage: 20Gi

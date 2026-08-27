@@ -1,0 +1,9 @@
+# The deployment's own namespace, so `kubectl apply -k .` is a single command on a
+# fresh cluster instead of apply / create ns / apply again.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/part-of: devops-agent

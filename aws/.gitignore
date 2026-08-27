@@ -1,0 +1,27 @@
+# Terraform / Terragrunt
+.terraform/
+.terraform.lock.hcl
+.terragrunt-cache/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tg.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+.terraformrc
+terraform.rc
+
+# Local variable files - may contain account-specific values
+*.auto.tfvars
+terraform.tfvars
+
+# Keys and certificates - never commit these
+*.pem
+*.key
+id_rsa*
+
+# Extensionless SSH private key that the *.key / *.pem rules above do not catch.
+# The matching argocd.pub is safe to commit; the private half must never be.
+terraform/argocd/argocd

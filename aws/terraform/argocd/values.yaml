@@ -1,0 +1,23 @@
+server:
+  extraArgs:
+    - --insecure
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+
+repoServer:
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 5
+
+applicationSet:
+  replicaCount: 2
+
+redis:
+  ha:
+    enabled: true
+
+controller:
+  replicas: 1

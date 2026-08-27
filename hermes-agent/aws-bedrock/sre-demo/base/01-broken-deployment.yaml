@@ -1,0 +1,34 @@
+# A deliberately broken deployment for the demo: nginx:faulty is a tag that does not
+# exist on Docker Hub, so the pod lands in ImagePullBackOff — the issue Hermes fixes.
+#
+# The `demo` namespace itself and the RoleBinding that authorizes the fix both live in
+# the base (../kubernetes/rbac/), so this overlay adds only the broken workload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-nginx
+  namespace: demo
+  labels:
+    app: demo-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-nginx
+  template:
+    metadata:
+      labels:
+        app: demo-nginx
+    spec:
+      containers:
+        - name: demo-nginx            # container name == deployment name
+          image: nginx:faulty         # 👈 broken on purpose (nonexistent tag)
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: "25m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"

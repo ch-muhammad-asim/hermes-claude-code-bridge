@@ -1,0 +1,41 @@
+#!/bin/bash
+# k3s single-node bootstrap for the Hermes agent.
+#
+# Ends by publishing a kubeconfig to S3 with the node's PUBLIC address substituted,
+# so an operator gets kubectl access with no SSH key and no inbound port 22.
+set -euxo pipefail
+exec > >(tee /var/log/hermes-k3s-bootstrap.log) 2>&1
+
+dnf install -y tar
+
+# k3s ships Traefik v2 as a packaged HelmChart. Disabled here so the pinned Traefik
+# v3 chart from aws/kubernetes/traefik/ is the only ingress controller - two
+# controllers watching the same IngressClass fight over the same host ports.
+#
+# servicelb (klipper) is deliberately LEFT ENABLED: it is what gives a
+# `type: LoadBalancer` Service an address on a cluster with no cloud controller,
+# by binding the port on the host. That is how Traefik reaches 80/443.
+curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${k3s_channel}" sh -s - server \
+  --disable traefik \
+  --write-kubeconfig-mode 644 \
+  --tls-san "$(curl -s -H "X-aws-ec2-metadata-token: $(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')" http://169.254.169.254/latest/meta-data/public-ipv4)"
+
+# Wait for the API to actually serve before anything downstream trusts it.
+for i in $(seq 1 60); do
+  if /usr/local/bin/k3s kubectl get --raw='/readyz' >/dev/null 2>&1; then break; fi
+  sleep 5
+done
+/usr/local/bin/k3s kubectl get nodes -o wide
+
+TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
+
+# k3s writes the kubeconfig pointing at 127.0.0.1, which is useless off-host.
+sed "s|https://127.0.0.1:6443|https://$PUBLIC_IP:6443|" /etc/rancher/k3s/k3s.yaml > /tmp/kubeconfig
+
+# Server-side encryption is enforced by the bucket policy, so state it explicitly.
+aws s3 cp /tmp/kubeconfig "s3://${kubeconfig_bucket}/${kubeconfig_key}" \
+  --region "${region}" --sse aws:kms
+rm -f /tmp/kubeconfig
+
+echo "HERMES_K3S_BOOTSTRAP_COMPLETE"

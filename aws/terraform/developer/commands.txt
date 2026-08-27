@@ -1,0 +1,22 @@
+export PROFILE_NAME=asim
+
+aws configure --profile $PROFILE_NAME
+
+aws sts get-caller-identity --profile $PROFILE_NAME
+
+[profile developer]
+role_arn = arn:aws:iam::263392498268:role/eks-developers
+source_profile = asim
+
+# verify the role
+aws sts get-caller-identity --profile developer
+
+aws configure list
+
+export AWS_PROFILE=developer
+
+aws configure list
+
+kubectl auth can-i "*" "*"
+
+kubectl auth can-i get pods

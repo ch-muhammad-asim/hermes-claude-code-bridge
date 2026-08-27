@@ -1,0 +1,61 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── k3s overlay ────────────────────────────────────────────────────────────────
+# The base (../../kubernetes) targets EKS. Two things in it are EKS-specific and are
+# patched here rather than weakened in the base, so the base stays correct for the
+# day the account's SCP permits eks:CreateCluster:
+#
+#   1. gp3 StorageClass   — provisioner ebs.csi.aws.com does not exist on k3s. The
+#                           object would apply but never bind, and the PVC would sit
+#                           Pending forever. k3s ships `local-path` (Rancher's local
+#                           provisioner) as the default StorageClass instead.
+#   2. Bedrock credentials — on EKS these come from a Pod Identity association; on
+#                           EC2 they come from the instance profile via IMDS. No
+#                           manifest change is needed for that (boto3's default
+#                           credential chain handles both), which is why there is no
+#                           patch for it here — only this note, so nobody goes
+#                           looking for one.
+#
+#   kubectl apply -k hermes-agent/aws-bedrock/overlays/k3s
+resources:
+  - ../../kubernetes
+
+# Drop the gp3 StorageClass: its provisioner is not installed on k3s.
+patches:
+  - target:
+      group: storage.k8s.io
+      version: v1
+      kind: StorageClass
+      name: gp3
+    patch: |
+      $patch: delete
+      apiVersion: storage.k8s.io/v1
+      kind: StorageClass
+      metadata:
+        name: gp3
+
+  # Point the state volume at k3s's local-path provisioner. local-path is
+  # WaitForFirstConsumer and node-local, which suits a single-node cluster: the
+  # volume lands on the only node the pod can schedule to.
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: hermes-agent
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: hermes-agent
+        namespace: devops-agent
+      spec:
+        volumeClaimTemplates:
+          - metadata:
+              name: agent-state
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              storageClassName: local-path
+              resources:
+                requests:
+                  storage: 20Gi

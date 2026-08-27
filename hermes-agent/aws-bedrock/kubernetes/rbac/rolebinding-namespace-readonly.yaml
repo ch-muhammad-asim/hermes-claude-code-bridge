@@ -1,0 +1,20 @@
+# 🔗 Bind the read-only namespaced Role to the hermes-agent ServiceAccount.
+# Because the pod runs as this SA, the in-cluster token Hermes' kubectl uses
+# is automatically scoped to exactly these permissions — no extra kubeconfig.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: hermes-namespace-readonly
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+subjects:
+  - kind: ServiceAccount
+    name: hermes-agent
+    namespace: devops-agent
+roleRef:
+  kind: Role
+  name: hermes-namespace-readonly
+  apiGroup: rbac.authorization.k8s.io

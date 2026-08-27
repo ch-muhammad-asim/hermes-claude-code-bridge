@@ -1,0 +1,37 @@
+---
+apiVersion: karpenter.sh/v1alpha5
+kind: Provisioner
+metadata:
+  name: app
+spec:
+  ttlSecondsAfterEmpty: 60 # scale down nodes after 60 seconds without workloads (excluding daemons)
+  ttlSecondsUntilExpired: 604800 # expire nodes after 7 days (in seconds) = 7 * 60 * 60 * 24
+  limits:
+    resources:
+      cpu: 100 # limit to 100 CPU cores
+      memory: 100Gi # limit to 100Gi of memory
+  requirements:
+    - key: "topology.kubernetes.io/zone"
+      operator: In
+      values: [us-east-1a, us-east-1b, us-east-1c]
+    - key: "karpenter.sh/capacity-type"
+      operator: In
+      values: ["spot"]
+    # Include general purpose instance families
+    - key: karpenter.k8s.aws/instance-family
+      operator: In
+      values: [t3a]
+    # Exclude small instance sizes
+    - key: karpenter.k8s.aws/instance-size
+      operator: In #NotIn
+      values: [medium]
+  providerRef:
+    name: cloudgeeks-ca-provider
+  labels:
+      type: karpenter
+      provisioner: app
+  taints:
+    - key: provisioner/app
+      effect: NoSchedule
+  consolidation:
+    enabled: false

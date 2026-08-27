@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── SRE demo overlay ───────────────────────────────────────────────────────────
+# Layers on top of the Bedrock base (../kubernetes) and, on `kubectl apply -k .`,
+# adds a Deployment that is broken on purpose so Hermes has something to fix.
+#
+# Deploy with `kubectl apply -k .` (NOT `-f` — this is a Kustomize overlay).
+#
+# Unlike the Claude Code bridge demo (../../../hermes-agent-devops-demo), this needs
+# only ONE extra thing, not three:
+#
+#   Gate 1 (RBAC)  — already in the base: rbac/clusterrole-sre-remediation.yaml
+#                    bound to `demo` by rbac/rolebinding-sre-remediation.yaml
+#   Gate 2 (harness) — DOES NOT EXIST on this path. There is no Claude Code tool
+#                    policy to open: Hermes talks to Bedrock through the bridge and
+#                    runs kubectl with its own `terminal` tool. RBAC is the only
+#                    machine-enforced gate, which is why it is scoped per namespace.
+#   Gate 3 (skill) — already in the base: skills/sre-pod-remediation/SKILL.md
+#
+# So the demo is just the broken workload. Revert with:
+#   kubectl delete -k .          # removes only the broken Deployment
+resources:
+  - ../kubernetes
+  - base

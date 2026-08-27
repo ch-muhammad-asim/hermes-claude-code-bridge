@@ -1,0 +1,84 @@
+#!/bin/sh
+# Read-only `gh` for the Hermes SRE agent (replaces the github-sre-readonly MCP).
+#
+# Two jobs:
+#   1. Mint a FRESH GitHub App installation token on every call. App installation
+#      tokens expire after ~1h; the old MCP minted once at process start and began
+#      returning "401 Bad credentials" once that token expired. Per-call minting
+#      makes that failure mode impossible.
+#   2. Enforce a read-only allowlist at the agent layer. This is defense-in-depth on
+#      top of the read-only scope of the `hermes-sre-readonly` GitHub App
+#      and the SOUL.md guardrail. Anything not explicitly allowed is refused.
+#
+# Design: allowlist of read verbs only; the App's read-only token is the hard
+# backstop. Add a subcommand to the allowlist below if the SRE agent needs it.
+set -eu
+
+GH_REAL="${GH_REAL:-/opt/data/gh/bin/gh}"
+KEY="${GITHUB_APP_PRIVATE_KEY_FILE:-/var/run/secrets/hermes-github-app/private-key.pem}"
+APP_ID="${GITHUB_APP_ID:-$(cat /var/run/secrets/hermes-github-app/app-id 2>/dev/null || true)}"
+INSTALL_ID="${GITHUB_APP_INSTALLATION_ID:-$(cat /var/run/secrets/hermes-github-app/installation-id 2>/dev/null || true)}"
+
+deny() { echo "gh: '$*' is blocked by the read-only SRE policy" >&2; exit 64; }
+
+cmd="${1:-}"
+case "$cmd" in
+  ""|version|--version|help|--help|-h)
+    exec "$GH_REAL" "$@"
+    ;;
+  repo|pr|issue|run|workflow|release|label|gist)
+    sub="${2:-}"
+    case "$sub" in
+      list|view|diff|checks|download|status|"") ;;
+      *) deny "$cmd $sub" ;;
+    esac
+    ;;
+  search|status)
+    : # read-only families
+    ;;
+  api)
+    # Default `gh api` (no method, no fields) is a GET. Reject anything that turns
+    # it into a write: a non-GET/HEAD --method, or any field/body flag (-f/-F/--input).
+    prev=""
+    for a in "$@"; do
+      case "$prev" in
+        -X|--method) case "$a" in GET|HEAD) ;; *) deny "api --method $a" ;; esac ;;
+      esac
+      case "$a" in
+        -X*)        m=${a#-X};        case "$m" in GET|HEAD) ;; *) deny "api $a" ;; esac ;;
+        --method=*) m=${a#--method=}; case "$m" in GET|HEAD) ;; *) deny "api $a" ;; esac ;;
+        -f|-F|--field|--raw-field|--input) deny "api write field ($a)" ;;
+        --field=*|--raw-field=*)            deny "api write field ($a)" ;;
+      esac
+      prev="$a"
+    done
+    ;;
+  *)
+    deny "$cmd"
+    ;;
+esac
+
+# --- mint a fresh installation token -------------------------------------
+: "${APP_ID:?GITHUB_APP_ID is required}"
+: "${INSTALL_ID:?GITHUB_APP_INSTALLATION_ID is required}"
+test -r "$KEY"
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+now="$(date +%s)"
+hdr="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | b64url)"
+pld="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "$APP_ID" | b64url)"
+sig="$(printf '%s' "${hdr}.${pld}" | openssl dgst -sha256 -sign "$KEY" | b64url)"
+jwt="${hdr}.${pld}.${sig}"
+token="$(curl -fsS --retry 3 --retry-delay 2 -X POST \
+  -H "Authorization: Bearer ${jwt}" \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'X-GitHub-Api-Version: 2022-11-28' \
+  "https://api.github.com/app/installations/${INSTALL_ID}/access_tokens" \
+  | python3 -c 'import sys, json; print(json.load(sys.stdin)["token"])')"
+unset hdr pld sig jwt
+
+export GH_TOKEN="$token"
+export GH_PAGER=cat
+export GH_PROMPT_DISABLED=1
+export GH_NO_UPDATE_NOTIFIER=1
+exec "$GH_REAL" "$@"

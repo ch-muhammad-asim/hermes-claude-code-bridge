@@ -1,0 +1,11 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The SRE demo on the k3s cluster: same broken workload as ../kustomization.yaml, but
+# composed on top of the k3s overlay (local-path storage, no gp3 StorageClass) instead
+# of the EKS-targeted base. Use ../ on EKS, this on k3s.
+#
+#   kubectl apply -k hermes-agent/aws-bedrock/sre-demo/k3s
+resources:
+  - ../../overlays/k3s
+  - ../base
