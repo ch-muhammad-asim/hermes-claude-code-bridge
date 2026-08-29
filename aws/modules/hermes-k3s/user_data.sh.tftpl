@@ -1,41 +1,136 @@
 #!/bin/bash
-# k3s single-node bootstrap for the Hermes agent.
+# End-to-end bootstrap for the Hermes agent on single-node k3s.
 #
-# Ends by publishing a kubeconfig to S3 with the node's PUBLIC address substituted,
-# so an operator gets kubectl access with no SSH key and no inbound port 22.
+# terragrunt apply finishes with a WORKING stack, not just a machine: k3s, Traefik,
+# the Hermes StatefulSet and its Secrets are all in place by the time this exits.
+#
+# Contract with Terraform: the last thing this script does is write "COMPLETE" to
+# s3://<bucket>/<status_key>. A trap writes "FAILED:<line>" on any error. Terraform
+# polls that object and fails the apply if it never turns COMPLETE, so a broken
+# bootstrap surfaces as a failed apply instead of a silently half-built cluster.
+#
+# Everything is idempotent enough to survive a re-run, and user_data_replace_on_change
+# means editing this file replaces the instance rather than leaving it stale.
 set -euxo pipefail
 exec > >(tee /var/log/hermes-k3s-bootstrap.log) 2>&1
 
-dnf install -y tar
+BUCKET="${kubeconfig_bucket}"
+STATUS_KEY="${status_key}"
+REGION="${region}"
 
-# k3s ships Traefik v2 as a packaged HelmChart. Disabled here so the pinned Traefik
-# v3 chart from aws/kubernetes/traefik/ is the only ingress controller - two
-# controllers watching the same IngressClass fight over the same host ports.
-#
-# servicelb (klipper) is deliberately LEFT ENABLED: it is what gives a
-# `type: LoadBalancer` Service an address on a cluster with no cloud controller,
-# by binding the port on the host. That is how Traefik reaches 80/443.
+report() { echo "$1" > /tmp/status.txt; aws s3 cp /tmp/status.txt "s3://$BUCKET/$STATUS_KEY" --region "$REGION" --sse aws:kms || true; }
+trap 'report "FAILED:line-$LINENO"' ERR
+report "RUNNING"
+
+imds() {
+  local tok
+  tok=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
+  curl -s -H "X-aws-ec2-metadata-token: $tok" "http://169.254.169.254/latest/meta-data/$1"
+}
+
+dnf install -y tar git
+
+PUBLIC_IP=$(imds public-ipv4)
+
+# ── k3s ───────────────────────────────────────────────────────────────────────
+# --disable traefik: k3s ships Traefik v2 as a packaged HelmChart. The pinned
+#   Traefik v3 chart below is the only ingress controller; two controllers watching
+#   one IngressClass fight over the same host ports.
+# servicelb (klipper) is deliberately LEFT ENABLED - it is what gives a
+#   type: LoadBalancer Service an address with no cloud controller present.
+# --tls-san: without the public IP in the cert SAN, an off-host kubectl fails with
+#   "certificate is valid for 10.43.0.1, 127.0.0.1, not <public ip>".
 curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL="${k3s_channel}" sh -s - server \
   --disable traefik \
   --write-kubeconfig-mode 644 \
-  --tls-san "$(curl -s -H "X-aws-ec2-metadata-token: $(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')" http://169.254.169.254/latest/meta-data/public-ipv4)"
+  --tls-san "$PUBLIC_IP"
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export PATH=/usr/local/bin:$PATH
 
 # Wait for the API to actually serve before anything downstream trusts it.
 for i in $(seq 1 60); do
-  if /usr/local/bin/k3s kubectl get --raw='/readyz' >/dev/null 2>&1; then break; fi
+  kubectl get --raw='/readyz' >/dev/null 2>&1 && break
   sleep 5
 done
-/usr/local/bin/k3s kubectl get nodes -o wide
+kubectl get nodes -o wide
 
-TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')
-PUBLIC_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4)
-
-# k3s writes the kubeconfig pointing at 127.0.0.1, which is useless off-host.
+# ── publish kubeconfig ────────────────────────────────────────────────────────
+# k3s writes 127.0.0.1, which is useless off-host. Rewrite to the public address.
 sed "s|https://127.0.0.1:6443|https://$PUBLIC_IP:6443|" /etc/rancher/k3s/k3s.yaml > /tmp/kubeconfig
-
-# Server-side encryption is enforced by the bucket policy, so state it explicitly.
-aws s3 cp /tmp/kubeconfig "s3://${kubeconfig_bucket}/${kubeconfig_key}" \
-  --region "${region}" --sse aws:kms
+aws s3 cp /tmp/kubeconfig "s3://$BUCKET/${kubeconfig_key}" --region "$REGION" --sse aws:kms
 rm -f /tmp/kubeconfig
+report "K3S_READY"
 
+if [ "${deploy_hermes}" != "true" ]; then
+  report "COMPLETE"
+  echo "HERMES_K3S_BOOTSTRAP_COMPLETE (cluster only)"
+  exit 0
+fi
+
+# ── helm (pinned + checksum-verified) ─────────────────────────────────────────
+HELM_V="${helm_version}"
+cd /tmp
+curl -fsSLO "https://get.helm.sh/helm-$HELM_V-linux-amd64.tar.gz"
+curl -fsSLO "https://get.helm.sh/helm-$HELM_V-linux-amd64.tar.gz.sha256sum"
+sha256sum -c "helm-$HELM_V-linux-amd64.tar.gz.sha256sum"
+tar -xzf "helm-$HELM_V-linux-amd64.tar.gz"
+install -m 0755 linux-amd64/helm /usr/local/bin/helm
+helm version --short
+
+# ── manifests ─────────────────────────────────────────────────────────────────
+rm -rf /opt/hermes-manifests
+git clone --depth 1 --branch "${manifests_ref}" "${manifests_repo}" /opt/hermes-manifests
+cd /opt/hermes-manifests
+
+# ── Traefik (CRDs first, both pinned to the same chart version) ────────────────
+CHART_V="${traefik_chart_version}"
+helm repo add traefik https://traefik.github.io/charts
+helm repo update
+helm show crds traefik/traefik --version "$CHART_V" | kubectl apply --server-side --force-conflicts -f -
+helm -n traefik upgrade --install traefik traefik/traefik --version "$CHART_V" \
+  --create-namespace --values "${traefik_values}" --wait --timeout 6m
+report "TRAEFIK_READY"
+
+# ── secrets ───────────────────────────────────────────────────────────────────
+kubectl create namespace devops-agent --dry-run=client -o yaml | kubectl apply -f -
+
+BRIDGE_KEY=$(openssl rand -hex 32)
+DASH_PW=$(openssl rand -hex 16)
+
+# The dashboard hash MUST be produced by the same image the StatefulSet runs, or it
+# is generated by a different build than the one verifying it. Running it as a pod
+# avoids needing a container runtime CLI on the host.
+kubectl -n devops-agent delete pod hashgen --ignore-not-found
+kubectl -n devops-agent run hashgen --restart=Never --image="${hermes_image}" \
+  --env="P=$DASH_PW" --env="PYTHONPATH=/opt/hermes" --command -- \
+  /opt/hermes/.venv/bin/python -c \
+  'import os; from plugins.dashboard_auth.basic import hash_password; print("HASH="+hash_password(os.environ["P"]))'
+kubectl -n devops-agent wait --for=jsonpath='{.status.phase}'=Succeeded pod/hashgen --timeout=600s
+DASH_HASH=$(kubectl -n devops-agent logs hashgen | sed -n 's/^HASH=//p')
+kubectl -n devops-agent delete pod hashgen
+test -n "$DASH_HASH"
+
+kubectl -n devops-agent create secret generic hermes-agent-secrets \
+  --from-literal=API_SERVER_KEY="$(openssl rand -hex 32)" \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_USERNAME=admin \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_PASSWORD_HASH="$DASH_HASH" \
+  --from-literal=HERMES_DASHBOARD_BASIC_AUTH_SECRET="$(openssl rand -hex 32)" \
+  --from-literal=BEDROCK_CLAUDE_BRIDGE_API_KEY="$BRIDGE_KEY" \
+  --dry-run=client -o yaml | kubectl apply -f -
+
+# Credentials go to SSM SecureString, never to a log or an S3 object. Retrieve with
+# the command in the module's `credentials_command` output.
+aws ssm put-parameter --region "$REGION" --overwrite --type SecureString \
+  --name "${ssm_prefix}/dashboard-password" --value "$DASH_PW"
+aws ssm put-parameter --region "$REGION" --overwrite --type SecureString \
+  --name "${ssm_prefix}/bridge-api-key" --value "$BRIDGE_KEY"
+report "SECRETS_READY"
+
+# ── Hermes ────────────────────────────────────────────────────────────────────
+kubectl apply -k "${hermes_overlay}"
+kubectl -n devops-agent rollout status statefulset/hermes-agent --timeout=600s
+
+kubectl get pods -A
+report "COMPLETE"
 echo "HERMES_K3S_BOOTSTRAP_COMPLETE"

@@ -108,13 +108,41 @@ data "aws_iam_policy_document" "node" {
     resources = ["*"]
   }
 
-  # Exactly one object, not the bucket: the node publishes its kubeconfig and can
-  # do nothing else in the state bucket it shares with Terraform.
+  # Exactly two objects, not the bucket: the node publishes its kubeconfig and its
+  # bootstrap status, and can do nothing else in the state bucket it shares with
+  # Terraform.
   statement {
-    sid       = "PublishKubeconfig"
+    sid     = "PublishKubeconfigAndStatus"
+    effect  = "Allow"
+    actions = ["s3:PutObject"]
+    resources = [
+      "arn:${local.partition}:s3:::${var.kubeconfig_bucket}/${var.kubeconfig_key}",
+      "arn:${local.partition}:s3:::${var.kubeconfig_bucket}/${var.status_key}",
+    ]
+  }
+
+  # The generated dashboard password and bridge API key go to SSM SecureString
+  # rather than to a log, an S3 object, or a Terraform output - so they never land
+  # in state. Scoped to this deployment's prefix only.
+  statement {
+    sid       = "PublishGeneratedCredentials"
     effect    = "Allow"
-    actions   = ["s3:PutObject"]
-    resources = ["arn:${local.partition}:s3:::${var.kubeconfig_bucket}/${var.kubeconfig_key}"]
+    actions   = ["ssm:PutParameter"]
+    resources = ["arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${var.ssm_prefix}/*"]
+  }
+
+  # SecureString encryption with the AWS-managed SSM key.
+  statement {
+    sid       = "EncryptSsmSecureStrings"
+    effect    = "Allow"
+    actions   = ["kms:Encrypt", "kms:GenerateDataKey"]
+    resources = ["*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["ssm.${var.region}.amazonaws.com"]
+    }
   }
 }
 
@@ -221,11 +249,70 @@ resource "aws_instance" "node" {
 
   user_data_replace_on_change = true
   user_data = templatefile("${path.module}/user_data.sh.tftpl", {
-    k3s_channel       = var.k3s_version_channel
-    kubeconfig_bucket = var.kubeconfig_bucket
-    kubeconfig_key    = var.kubeconfig_key
-    region            = var.region
+    k3s_channel           = var.k3s_version_channel
+    kubeconfig_bucket     = var.kubeconfig_bucket
+    kubeconfig_key        = var.kubeconfig_key
+    status_key            = var.status_key
+    region                = var.region
+    deploy_hermes         = var.deploy_hermes ? "true" : "false"
+    manifests_repo        = var.manifests_repo
+    manifests_ref         = var.manifests_ref
+    hermes_overlay        = var.hermes_overlay
+    traefik_values        = var.traefik_values
+    traefik_chart_version = var.traefik_chart_version
+    helm_version          = var.helm_version
+    hermes_image          = var.hermes_image
+    ssm_prefix            = var.ssm_prefix
   })
 
   tags = merge(local.tags, { Name = "${var.cluster_name}-node" })
+}
+
+
+###############################################################################
+# Bootstrap gate
+#
+# EC2 reports an instance as created the moment it boots - long before k3s,
+# Traefik and Hermes exist. Without this, `terragrunt apply` would succeed against
+# a half-built cluster and the failure would surface later, somewhere confusing.
+#
+# The node writes its progress to s3://<bucket>/<status_key>; this polls until it
+# reads COMPLETE, and fails the apply on FAILED or on timeout. That is what makes
+# the module end-to-end: apply returns only when the stack actually works.
+#
+# stale-marker guard: the object may still hold COMPLETE from a previous instance,
+# so the poll ignores anything written before this instance existed.
+###############################################################################
+
+resource "terraform_data" "bootstrap_gate" {
+  triggers_replace = [aws_instance.node.id]
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      BUCKET      = var.kubeconfig_bucket
+      STATUS_KEY  = var.status_key
+      REGION      = var.region
+      TIMEOUT_MIN = tostring(var.bootstrap_timeout_minutes)
+      INSTANCE_ID = aws_instance.node.id
+    }
+    command = <<-EOT
+      set -uo pipefail
+      deadline=$(( $(date +%s) + TIMEOUT_MIN * 60 ))
+      echo "waiting for $INSTANCE_ID to finish bootstrapping (timeout $${TIMEOUT_MIN}m)..."
+      last=""
+      while [ "$(date +%s)" -lt "$deadline" ]; do
+        status=$(aws s3 cp "s3://$BUCKET/$STATUS_KEY" - --region "$REGION" 2>/dev/null | tr -d '[:space:]' || true)
+        if [ -n "$status" ] && [ "$status" != "$last" ]; then echo "  status: $status"; last="$status"; fi
+        case "$status" in
+          COMPLETE) echo "bootstrap complete"; exit 0 ;;
+          FAILED*)  echo "bootstrap FAILED on the node ($status)."; echo "inspect: aws ssm start-session --target $INSTANCE_ID  then: sudo tail -100 /var/log/hermes-k3s-bootstrap.log"; exit 1 ;;
+        esac
+        sleep 15
+      done
+      echo "timed out after $${TIMEOUT_MIN}m waiting for bootstrap (last status: $${last:-none})."
+      echo "the console log usually shows why: aws ec2 get-console-output --instance-id $INSTANCE_ID --region $REGION --output text | tail -50"
+      exit 1
+    EOT
+  }
 }

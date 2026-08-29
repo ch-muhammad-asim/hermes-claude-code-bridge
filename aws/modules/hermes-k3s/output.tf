@@ -42,3 +42,33 @@ output "security_group_id" {
   description = "Security group protecting the node."
   value       = aws_security_group.node.id
 }
+
+output "dashboard_url" {
+  description = "Hermes dashboard. Point the DNS name at node_public_ip first."
+  value       = "https://hermes.saqlainmushtaq.com/"
+}
+
+output "credentials_command" {
+  description = "Prints the generated dashboard password. Stored as an SSM SecureString by the node, so it never enters Terraform state or a log."
+  value       = "aws ssm get-parameter --name ${var.ssm_prefix}/dashboard-password --with-decryption --region ${var.region} --query Parameter.Value --output text"
+}
+
+output "bridge_api_key_command" {
+  description = "Prints the bridge API key (rarely needed - the pod reads it from its Secret)."
+  value       = "aws ssm get-parameter --name ${var.ssm_prefix}/bridge-api-key --with-decryption --region ${var.region} --query Parameter.Value --output text"
+}
+
+output "bootstrap_log_command" {
+  description = "Reads the node's bootstrap log without SSH, via SSM Session Manager."
+  value       = "aws ssm start-session --target ${aws_instance.node.id} --region ${var.region}   # then: sudo tail -100 /var/log/hermes-k3s-bootstrap.log"
+}
+
+output "console_log_command" {
+  description = "Fallback when the node never came up far enough for SSM to register."
+  value       = "aws ec2 get-console-output --instance-id ${aws_instance.node.id} --region ${var.region} --output text | tail -80"
+}
+
+output "deployed_overlay" {
+  description = "Kustomize overlay the node applied. Must stay aligned with model_id."
+  value       = var.deploy_hermes ? var.hermes_overlay : "none (deploy_hermes = false)"
+}

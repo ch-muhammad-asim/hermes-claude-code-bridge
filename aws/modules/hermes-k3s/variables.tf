@@ -100,3 +100,84 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+###############################################################################
+# End-to-end bootstrap
+#
+# With deploy_hermes = true (the default) `terragrunt apply` returns a WORKING
+# stack: k3s + Traefik + Hermes, not just an EC2 instance. Terraform waits for the
+# node to report COMPLETE and fails the apply otherwise.
+###############################################################################
+
+variable "deploy_hermes" {
+  description = "Install Traefik and the Hermes agent during bootstrap. false provisions a bare k3s cluster and stops after publishing the kubeconfig."
+  type        = bool
+  default     = true
+}
+
+variable "manifests_repo" {
+  description = "Public Git repository the node clones the Kustomize manifests and Traefik values from."
+  type        = string
+  default     = "https://github.com/ch-muhammad-asim/hermes-claude-code-bridge.git"
+}
+
+variable "manifests_ref" {
+  description = "Branch or tag to clone. Pin to a tag for a reproducible rebuild."
+  type        = string
+  default     = "main"
+}
+
+variable "hermes_overlay" {
+  description = <<-EOT
+    Kustomize overlay applied on the node, relative to the repo root.
+      aws-bedrock/overlays/k3s            - Claude Sonnet 4.5 (the designed default)
+      aws-bedrock/overlays/k3s-haiku-4-5  - Claude Haiku 4.5, for accounts with no
+                                            Sonnet 4.5 Marketplace subscription
+    Keep this aligned with var.model_id, or InvokeModel returns AccessDeniedException:
+    the node role authorizes one specific model.
+  EOT
+  type        = string
+  default     = "aws-bedrock/overlays/k3s"
+}
+
+variable "traefik_values" {
+  description = "Traefik Helm values file, relative to the repo root."
+  type        = string
+  default     = "aws-bedrock/traefik/k3s-values.yaml"
+}
+
+variable "traefik_chart_version" {
+  description = "traefik/traefik chart version. CRDs are installed from the same version so the two cannot drift."
+  type        = string
+  default     = "41.3.0"
+}
+
+variable "helm_version" {
+  description = "Helm release installed on the node. Downloaded with its published sha256sum and verified."
+  type        = string
+  default     = "v3.16.0"
+}
+
+variable "hermes_image" {
+  description = "Hermes image used to generate the dashboard password hash. MUST equal the image in the StatefulSet, or the hash is produced by a different build than the one verifying it."
+  type        = string
+  default     = "nousresearch/hermes-agent:v2026.8.3"
+}
+
+variable "ssm_prefix" {
+  description = "SSM Parameter Store prefix for the generated dashboard password and bridge API key (SecureString)."
+  type        = string
+  default     = "/hermes/k3s"
+}
+
+variable "status_key" {
+  description = "S3 key the node writes its bootstrap status to. Terraform polls it and fails the apply if it never reaches COMPLETE."
+  type        = string
+  default     = "k3s/bootstrap-status"
+}
+
+variable "bootstrap_timeout_minutes" {
+  description = "How long to wait for the node to report COMPLETE. A full bootstrap (k3s + Traefik + image pulls + rollout) typically takes 5-8 minutes."
+  type        = number
+  default     = 20
+}

@@ -70,6 +70,37 @@ Pod Identity on EKS and IMDS on EC2, so nothing in the application changes.
 
 ---
 
+## 🚀 The short path — one command
+
+On the k3s path, the terragrunt module does **all of it**. The node installs k3s,
+Traefik and Hermes itself, generates its own Secrets, and reports `COMPLETE`;
+Terraform waits for that signal and fails the apply if it never arrives. So this is
+the whole deployment:
+
+```bash
+terragrunt apply --working-dir hermes-k3s
+```
+
+Then fetch the kubeconfig it published and the password it generated:
+
+```bash
+aws s3 cp s3://cloudgeeks-eks-blueprints-tfstate-<ACCOUNT_ID>/k3s/kubeconfig $HOME/.kube/hermes-k3s --region us-east-1 && chmod 600 $HOME/.kube/hermes-k3s && export KUBECONFIG=$HOME/.kube/hermes-k3s
+```
+
+```bash
+aws ssm get-parameter --name /hermes/k3s/dashboard-password --with-decryption --region us-east-1 --query Parameter.Value --output text
+```
+
+Full detail — how the kubeconfig gets from EC2 to your laptop, the bootstrap status
+protocol, credential handling, and troubleshooting — is in
+[`../../aws/modules/hermes-k3s/README.md`](../../aws/modules/hermes-k3s/README.md).
+
+Everything below is the **manual path**: required on EKS (where there is no
+`user_data` to do it), and useful on k3s when you are changing one layer rather than
+rebuilding, or when `deploy_hermes = false`.
+
+---
+
 ## 1️⃣ Infrastructure (Terragrunt)
 
 All infra goes through Terragrunt from `aws/terragrunt/env/dev/region/us-east-1`.
@@ -95,29 +126,20 @@ terragrunt apply --working-dir hermes-bedrock-iam
 aws eks update-kubeconfig --region us-east-1 --name cloudgeeks-eks-dev
 ```
 
-**k3s path** (when EKS is denied). The unit pins the Kubernetes API to your egress
-`/32` — an empty `api_allowed_cidrs` creates no rule at all, so a forgotten value
-fails closed rather than exposing 6443:
+**k3s path** (when EKS is denied). `api_allowed_cidrs` pins the Kubernetes API to
+your egress `/32` — empty creates no rule at all, so it fails closed (no kubectl)
+rather than open:
 
 ```bash
 terragrunt apply --working-dir hermes-k3s
 ```
 
-The node publishes its kubeconfig to S3 (a single-object `s3:PutObject` grant), so
-reaching the cluster needs no SSH key and no inbound port 22:
-
-```bash
-aws s3 cp s3://cloudgeeks-eks-blueprints-tfstate-381491923945/k3s/kubeconfig $HOME/.kube/hermes-k3s --region us-east-1 && chmod 600 $HOME/.kube/hermes-k3s && export KUBECONFIG=$HOME/.kube/hermes-k3s
-```
-
-```bash
-kubectl get nodes -o wide
-```
+With `deploy_hermes = true` (the default) you are done — skip to **Validate**. The
+steps below are what that bootstrap performs on your behalf.
 
 ## 2️⃣ Traefik
 
-Everything is driven by a single `CHART_VERSION` so the CRDs and the chart cannot
-drift apart:
+One `CHART_VERSION` drives the CRDs and the chart so they cannot drift:
 
 ```bash
 export CHART_VERSION=41.3.0
@@ -127,8 +149,7 @@ export CHART_VERSION=41.3.0
 helm repo add traefik https://traefik.github.io/charts && helm repo update
 ```
 
-CRDs first, pinned to the same chart version — always before the chart, or the
-IngressRoute kind does not exist yet:
+CRDs first — always before the chart, or the `IngressRoute` kind does not exist yet:
 
 ```bash
 helm show crds traefik/traefik --version "$CHART_VERSION" | kubectl apply --server-side --force-conflicts -f -
@@ -147,8 +168,8 @@ k3s (no LB controller; klipper binds host 80/443):
 helm -n traefik upgrade --install traefik traefik/traefik --version "$CHART_VERSION" --create-namespace --values ../traefik/k3s-values.yaml --wait --timeout 6m
 ```
 
-Confirm the IngressClass the IngressRoute names actually exists — an
-`ingressClassName` no controller watches is silently never picked up:
+Confirm the IngressClass the IngressRoute names exists — one no controller watches
+is silently never picked up:
 
 ```bash
 kubectl get ingressclass
@@ -160,28 +181,23 @@ Bedrock needs **no** credential here — that is the point of Pod Identity / the
 instance profile. Only the Hermes-internal secrets are required.
 
 ```bash
-export NAMESPACE=devops-agent
-```
-
-```bash
-kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
+export NAMESPACE=devops-agent && kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 ```bash
 export BEDROCK_CLAUDE_BRIDGE_API_KEY="$(openssl rand -hex 32)" && export HERMES_DASHBOARD_PASSWORD="$(openssl rand -hex 16)" && echo "dashboard password: $HERMES_DASHBOARD_PASSWORD"
 ```
 
-Hash the dashboard password **with the exact image the StatefulSet runs**, or the hash
-is produced by a different build than the one verifying it. Running it as a pod avoids
-needing a local Docker daemon; `--rm -it` can time out on the first pull, so create,
-wait, then read the log:
+Hash the password **with the exact image the StatefulSet runs**, or it is produced by
+a different build than the one verifying it. Running it as a pod avoids needing a
+local Docker daemon; `--rm -it` can time out on the first pull, so create, wait, read:
 
 ```bash
 kubectl -n "$NAMESPACE" run hashgen --restart=Never --image=nousresearch/hermes-agent:v2026.8.3 --env="HERMES_DASHBOARD_PASSWORD=$HERMES_DASHBOARD_PASSWORD" --env="PYTHONPATH=/opt/hermes" --command -- /opt/hermes/.venv/bin/python -c 'import os; from plugins.dashboard_auth.basic import hash_password; print("HASH="+hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
 ```
 
 ```bash
-kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded pod/hashgen --timeout=420s
+kubectl -n "$NAMESPACE" wait --for=jsonpath='{.status.phase}'=Succeeded pod/hashgen --timeout=600s
 ```
 
 ```bash
@@ -204,10 +220,16 @@ EKS:
 kubectl apply -k .
 ```
 
-k3s:
+k3s (Sonnet 4.5):
 
 ```bash
 kubectl apply -k ../overlays/k3s
+```
+
+k3s where the account has no Sonnet 4.5 Marketplace subscription:
+
+```bash
+kubectl apply -k ../overlays/k3s-haiku-4-5
 ```
 
 ```bash
@@ -290,6 +312,11 @@ Do not leave a public dashboard on a self-signed cert longer than a demo.
 | Pod stuck `ContainerCreating` on a missing Secret | Only `hermes-agent-secrets` is mandatory | Create it (step 3); the GitHub App Secret is `optional: true` |
 | IngressRoute never routes | `ingressClassName` names a class no controller watches | `kubectl get ingressclass` and align |
 | 404 from Traefik on the right host | IngressRoute in a namespace Traefik does not watch, or Host rule mismatch | Check `kubectl -n devops-agent describe ingressroute hermes-agent-dashboard` |
+| `bootstrap FAILED on the node` during apply | A step in `user_data` errored; the status names the failing line | `aws ssm start-session --target <id>` then `sudo tail -100 /var/log/hermes-k3s-bootstrap.log` |
+| Apply times out with status stuck at `RUNNING` | Slow image pulls or no egress | Raise `bootstrap_timeout_minutes`; check the NAT path |
+| Apply times out with **no** status object | Node never reached the AWS CLI | `aws ec2 get-console-output --instance-id <id> --output text \| tail -80` |
+| `kubectl` hangs after a rebuild | Public IP changed; 6443 rule still names the old CIDR, or kubeconfig is stale | Re-fetch the kubeconfig; set `api_allowed_cidrs` to your current `/32` |
+| `x509: certificate is valid for ...` | Instance was stopped/started, so the public IP is no longer in the cert SAN | `terragrunt apply -replace=aws_instance.node --working-dir hermes-k3s` |
 | `ThrottlingException` in bridge logs | Account-level Bedrock TPM/RPM quota | The bridge already retries; lower concurrency or request a quota increase |
 
 ## 🔒 Security hardening

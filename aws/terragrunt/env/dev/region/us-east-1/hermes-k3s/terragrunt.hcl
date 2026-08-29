@@ -59,4 +59,24 @@ inputs = {
   # back to claude-sonnet-4-5-20250929 in any account that has the subscription.
   model_id            = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
   foundation_model_id = "anthropic.claude-haiku-4-5-20251001-v1:0"
+
+  ###########################################################################
+  # End-to-end bootstrap
+  #
+  # The node installs k3s, Traefik and Hermes itself and reports COMPLETE, and
+  # Terraform waits for that - so `terragrunt apply` returns a working stack,
+  # not just an EC2 instance. Set deploy_hermes = false for a bare cluster.
+  #
+  # hermes_overlay MUST match model_id above: the node role authorizes exactly
+  # one model, so a mismatch fails at InvokeModel with AccessDeniedException.
+  #   .../k3s            -> Sonnet 4.5 (the designed default)
+  #   .../k3s-haiku-4-5  -> Haiku 4.5  (this sandbox: no Sonnet 4.5 subscription)
+  ###########################################################################
+  deploy_hermes  = true
+  hermes_overlay = "aws-bedrock/overlays/k3s-haiku-4-5"
+
+  # Pin to a tag instead of a branch for a byte-reproducible rebuild.
+  manifests_ref = "main"
+
+  bootstrap_timeout_minutes = 20
 }
