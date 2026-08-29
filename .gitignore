@@ -5,7 +5,10 @@ __pycache__/
 *.egg-info/
 .venv/
 venv/
-env/
+# Anchored to the repo root on purpose. An unanchored `env/` also matches
+# aws/terragrunt/env/ — the Terragrunt unit tree — and silently kept every
+# terragrunt.hcl out of version control.
+/env/
 
 # ── Secrets / local config — never commit real values ────────────────────────
 # Anything whose name contains "secret" is excluded, so a rendered Secret picks up

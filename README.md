@@ -82,7 +82,7 @@ public. One directory per cloud:
 | | Cloud | Model | Identity | Ingress | Guide |
 |---|---|---|---|---|---|
 | ☁️ | **Google Cloud** — Vertex AI on GKE | `claude-opus-4-8`, or `gemini-3.5-flash` (deployed default) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
-| 🟧 | **AWS** — Bedrock on EKS or k3s | **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5`, inference-profile only) | EKS Pod Identity, or EC2 instance profile | Traefik `IngressRoute` | [`aws-bedrock/`](./aws-bedrock) |
+| 🟧 | **AWS** — Bedrock on EKS, or k3s where EKS is SCP-blocked | **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5`, inference-profile only) | EKS Pod Identity, or EC2 instance profile | Traefik `IngressRoute` | [`aws-bedrock/`](./aws-bedrock) |
 
 The AWS deployment is a port of the Google one — same Hermes runtime config, same
 hardening posture, same chat-completions ⇄ Anthropic Messages translation. It adds one
@@ -121,7 +121,7 @@ implemented in it.
 | | Component | Purpose | Guide |
 |---|---|---|---|
 | ☁️ | **GCP / GKE** | Provision a cost-optimized VPC + GKE cluster (Workload Identity, on-demand 3-node) — one command via [`gcp-infra.sh`](./gcp/gcp-infra.sh) | [`gcp/`](./gcp) |
-| 🟧 | **AWS / EKS** | Terragrunt-driven EKS blueprint: VPC, EKS (access entries, add-ons), Karpenter, ALB controller IAM — plus the Bedrock IAM and k3s units the agent uses | [`aws/`](./aws) |
+| 🟧 | **AWS / EKS** | Terragrunt-driven EKS blueprint: VPC, EKS (access entries, add-ons), Karpenter, ALB controller IAM — plus the Bedrock IAM and the `hermes-k3s` unit used where an org SCP denies `eks:CreateCluster` | [`aws/`](./aws) |
 | 🚦 | **Traefik v3** | TLS ingress controller for the dashboard/API `IngressRoute`, chart-pinned CRDs. Per-platform values: GKE, EKS (NLB via the AWS LB Controller), k3s (klipper) | [`kubernetes/traefik/`](./kubernetes/traefik) · [`aws/kubernetes/traefik/`](./aws/kubernetes/traefik) · [`aws-bedrock/traefik/`](./aws-bedrock/traefik) |
 | 🎬 | **DevOps demo** | Break a deployment, watch Hermes diagnose & fix it, then revoke — a read-only → scoped-grant → revoke showcase | [`hermes-agent-devops-demo/`](./hermes-agent-devops-demo) |
 | 🎬 | **DevOps demo (OpenCode)** | The same three-gate diagnose-and-fix story on **free** models, at $0 inference | [`opencode-demo/`](./opencode-demo) |

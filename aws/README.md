@@ -107,43 +107,89 @@ each module usable across every environment and region.
 
 Point `terragrunt/account.hcl` at your account id, bucket and key alias.
 
+### ⚠️ Account: `637423440646` — IAM permissions
+
+| Service | IAM | SCP | Result |
+|---------|-----|-----|--------|
+| **Bedrock** | ✅ `bedrock:*` (dedicated policy) | — | **Allowed** |
+| **EKS** | ✅ `Allow` (via `NotAction` in `allow_all`) | ❌ **Deny** `eks:CreateCluster` (SCP `p-2nwbuy01`) | **Blocked** |
+| **EC2, S3, IAM, VPC, etc.** | ✅ `Allow` | — | **Allowed** |
+| **Lightsail** | ❌ Explicit deny in IAM | — | Blocked |
+| **SageMaker** | ❌ Explicit deny in IAM | — | Blocked |
+
+The `allow_all` policy grants all actions except `lightsail:*` and `sagemaker:*` via `NotAction`, so EKS is **IAM-allowed**. The SCP deny at the Organizations level overrides this. See [docs/sandbox/](docs/sandbox/) for details.
+
 ---
+
+## ⚠️ EKS is blocked in Pluralsight sandboxes
+
+`eks:CreateCluster` is denied by an AWS Organizations service control policy
+(`o-yu55c2titn` / `p-2nwbuy01`) in both the regular and the AI Cloud Sandbox:
+
+```text
+AccessDeniedException: User: arn:aws:iam::<acct>:user/cloud_user is not authorized
+to perform: eks:CreateCluster on resource: arn:aws:eks:us-east-1:<acct>:cluster/...
+with an explicit deny in a service control policy
+```
+
+An SCP deny sits above the account. The IAM user *is* allowed the action by its own
+identity policy — `aws iam simulate-principal-policy` returns `allowed`, because it
+does not evaluate SCPs — but nothing inside a member account can override it, and
+member accounts cannot read the policy. The deny is unconditional: verified across
+Kubernetes 1.30/1.34/1.35/1.36 and the API default, both `authenticationMode`
+values, tagged and untagged requests, EKS Auto Mode, `us-east-1` and `us-west-2`,
+and multiple cluster names, in two separate sandbox accounts.
+
+**Use the `hermes-k3s` unit instead** — a single-node k3s cluster on EC2, which the
+sandbox does permit. It is a drop-in substitute: same VPC, same Kubernetes version
+line, and every layer above the cluster is unchanged.
+
+```bash
+terragrunt apply --working-dir hermes-k3s
+```
+
+Deploy the `eks` unit only in an account whose SCP permits it. Everything else in
+this blueprint — VPC, Karpenter, ALB controller IAM, OIDC — is unaffected.
 
 ## 🚢 Deploy
 
 All deployment goes through Terragrunt. Run from
 `terragrunt/env/dev/region/us-east-1`.
 
-Plan everything, respecting dependency order:
+### Full command sequence
+
+```bash
+cd terragrunt/env/dev/region/us-east-1
+
+# Phase 1: VPC
+terragrunt apply --working-dir vpc
+
+# Phase 2: EKS (requires eks:CreateCluster — SCP may block)
+terragrunt apply --working-dir eks
+
+# Phase 3: Karpenter (depends on EKS)
+terragrunt apply --working-dir karpenter
+
+# Phase 4: ALB Controller IAM (depends on EKS)
+terragrunt apply --working-dir alb-controller-iam
+
+# Phase 5: Hermes Bedrock IAM (depends on EKS)
+terragrunt apply --working-dir hermes-bedrock-iam
+
+# Phase 6: Configure kubectl
+aws eks update-kubeconfig --region us-east-1 --name cloudgeeks-eks-dev
+kubectl get nodes
+```
+
+> **⚠️ Phase 2 may fail** with `AccessDeniedException` on `eks:CreateCluster` if your
+> account's AWS Organizations SCP denies it. The IAM policy (`allow_all`) grants EKS
+> via `NotAction`, but an SCP deny overrides it. See [docs/sandbox/](docs/sandbox/).
+
+### Bulk apply (if all permissions are confirmed)
 
 ```bash
 terragrunt run --all plan
-```
-
-Apply everything:
-
-```bash
 terragrunt run --all apply
-```
-
-Or one layer at a time, which is what you want the first time through:
-
-```bash
-terragrunt apply --working-dir vpc
-```
-
-```bash
-terragrunt apply --working-dir eks
-```
-
-```bash
-terragrunt apply --working-dir karpenter
-```
-
-Then point kubectl at the cluster:
-
-```bash
-aws eks update-kubeconfig --region us-east-1 --name cloudgeeks-eks-dev
 ```
 
 ---

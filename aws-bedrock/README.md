@@ -8,12 +8,14 @@ Messages API. This path uses no Claude Code CLI and no Claude subscription sessi
 
 ```text
 Target environment
-  AWS account:  381491923945
+  AWS account:  637423440646
   Region:       us-east-1
   EKS cluster:  cloudgeeks-eks-dev
   Model:        us.anthropic.claude-sonnet-4-5-20250929-v1:0
   Namespace:    devops-agent
   Ingress:      hermes.saqlainmushtaq.com  (Traefik IngressRoute, traefik-external)
+  IAM:          allow_all (EKS allowed via NotAction; SCP denies eks:CreateCluster)
+  Bedrock:      bedrock:* (dedicated whitelist policy)
 ```
 
 Ported from [`../vertex-ai/`](../vertex-ai/) — the Hermes runtime configuration
@@ -299,30 +301,17 @@ two which are deliberate:
 | GitHub App Secret | Required (pod blocks without it) | **Optional** (`optional: true`) |
 | Write access | None — strictly read-only | **Scoped remediation** in bound namespaces |
 
-## ⚠️ EKS is not available in the AI sandbox
+## ⚠️ EKS SCP denial — current state
 
-The Pluralsight **AI** Cloud Sandbox (the Bedrock-enabled one) denies
-`eks:CreateCluster` through an AWS Organizations service control policy
-(`arn:aws:organizations::674998908974:policy/o-yu55c2titn/service_control_policy/p-2nwbuy01`).
+The sandbox's AWS Organizations SCP (`p-2nwbuy01`) explicitly denies `eks:CreateCluster`.
 
-This is an **org-level explicit deny**. The account's IAM user is *allowed* the action
-by its own identity policy — `aws iam simulate-principal-policy` returns `allowed` —
-but an SCP deny cannot be overridden from inside a member account, and member accounts
-cannot even read the policy. It is unconditional; verified denied across:
+**IAM permissions are correct** — the `allow_all` policy grants EKS via `NotAction` (confirmed via `simulate-principal-policy`). The SCP deny overrides this at the Organizations level and **cannot be bypassed from within the account**.
 
-* Kubernetes versions 1.30, 1.34, 1.35, 1.36 and the API default
-* `authenticationMode` `API` and `CONFIG_MAP`
-* tagged and untagged requests
-* EKS Auto Mode (`--compute-config enabled=true`)
-* regions `us-east-1` and `us-west-2`, and two cluster names
-* the real `terragrunt apply --working-dir eks`
+Verified denied across: all Kubernetes versions (1.30–1.36), both `authenticationMode` values, tagged/untagged, EKS Auto Mode, both regions, and two cluster names. No cluster is pre-provisioned in any region.
 
-No cluster is pre-provisioned in any region either. `ec2:RunInstances` at
-`t3.medium` **is** permitted, so [`aws/modules/hermes-k3s`](../aws/modules/hermes-k3s)
-provisions a single-node k3s cluster as a drop-in substitute for the `eks` unit.
-Use `modules/eks` in any account whose SCP permits it — everything layered above the
-cluster is identical either way, and **the bridge is byte-identical**: boto3's default
-credential chain resolves EKS Pod Identity on EKS and the EC2 instance profile on k3s.
+**Resolution:** The Pluralsight/org admin must modify SCP `p-2nwbuy01` to allow `eks:CreateCluster`. Member accounts cannot read or modify the policy.
+
+**Current deployment:** Uses [`aws/modules/hermes-k3s`](../aws/modules/hermes-k3s/) as a drop-in substitute. `ec2:RunInstances` at `t3.medium` is permitted. The EKS path in `modules/eks` is fully functional and should be used once the SCP is lifted — everything layered above the cluster is identical either way.
 
 ## 🛠️ Deployment
 
@@ -331,18 +320,28 @@ Infra first, then the agent — the full runbook is in
 
 ```bash
 # 1. Infra (Terragrunt)
-#      vpc  ->  eks + hermes-bedrock-iam      (where EKS is permitted)
-#      vpc  ->  hermes-k3s                    (AI sandbox)
+#      vpc  ->  eks + hermes-bedrock-iam      (when SCP permits eks:CreateCluster)
+#      vpc  ->  hermes-k3s                    (current: SCP blocks EKS)
 # 2. Traefik   pinned chart 41.3.0, CRDs first, traefik-external IngressClass
 # 3. Secrets   envsubst < hermes/secrets/secret.template.yaml | kubectl apply -f -
 # 4. Agent     kubectl apply -k hermes        (EKS)
-#              kubectl apply -k overlays/k3s      (k3s)
+#              kubectl apply -k overlays/k3s  (k3s)
 # 5. Demo      kubectl apply -k sre-demo/k3s
 ```
 
+### IAM summary (account `637423440646`)
+
+| Permission | Source | Status |
+|---|---|---|
+| `bedrock:*` | Dedicated `bedrock-model-whitelist` policy | ✅ Allowed |
+| `eks:CreateCluster` | `allow_all` (NotAction) | ✅ IAM allowed, ❌ SCP denied |
+| `ec2:RunInstances` | `allow_all` | ✅ Allowed |
+| `lightsail:*` | Explicit deny in `allow_all` | ❌ Blocked |
+| `sagemaker:*` | Explicit deny in `allow_all` | ❌ Blocked |
+
 ## ✅ Verified deployed state
 
-Deployed and validated end to end in account `381491923945` / `us-east-1`:
+Deployed and validated end to end in account `637423440646` / `us-east-1`:
 
 | Check | Result |
 | --- | --- |

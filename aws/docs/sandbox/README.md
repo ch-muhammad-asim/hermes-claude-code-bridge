@@ -16,9 +16,28 @@ them by hitting them. These are the ones that matter for EKS.
 | EC2 Spot | ⛔ **Will not support** | `capacity_type = "ON_DEMAND"`, NodePool `capacity_types = ["on-demand"]` |
 | Concurrent EC2 instances | 9 (stopped included, terminated excluded) | 2-node system group + NodePool `limits.cpu = 12` (6 x t3.medium) |
 | EBS volume size | 100 GiB max | `node_disk_size` defaults to 50, with a `validation` block at 100 |
+| EKS | ⛔ **SCP denies `eks:CreateCluster`** | See [EKS SCP section](#-eks-scp-denial) below |
 | EKS versions | ⚠️ Standard support only - extended support blocked | `kubernetes_version = "1.36"` in `env.hcl`, plus `cluster_support_type = "STANDARD"` - see [auto-upgrade](../auto-upgrade/) |
 | Fargate | 4 running tasks, 2048 CPU / 4096 memory | not used here |
 | Billing / Cost Explorer | no access | nothing in this repo reads cost data |
+
+## ⛔ EKS SCP denial
+
+The sandbox's AWS Organizations SCP (`arn:aws:organizations::674998908974:policy/o-yu55c2titn/service_control_policy/p-2nwbuy01`) explicitly denies `eks:CreateCluster`.
+
+**IAM user has full EKS access** — the `allow_all` policy grants all actions except `lightsail:*` and `sagemaker:*` via `NotAction`. Running `aws iam simulate-principal-policy` confirms `eks:CreateCluster` is **allowed** at the IAM level.
+
+**SCP overrides IAM.** An SCP deny at the Organizations level is unconditional — it cannot be overridden from within a member account. The deny applies regardless of:
+- Kubernetes version (tested 1.30, 1.34, 1.35, 1.36, and API default)
+- `authenticationMode` (`API` or `CONFIG_MAP`)
+- Tagged vs untagged requests
+- EKS Auto Mode (`--compute-config enabled=true`)
+- Region (`us-east-1`, `us-west-2`)
+- Cluster name
+
+**Resolution:** The Pluralsight/org admin must modify or remove SCP `p-2nwbuy01` to allow `eks:CreateCluster`. Member accounts cannot read or modify the policy.
+
+**Current workaround:** [`modules/hermes-k3s`](../../modules/hermes-k3s/) provisions a single-node k3s cluster on EC2 (`ec2:RunInstances` at `t3.medium` is permitted). The EKS path in `modules/eks` is fully functional and should be used in any account whose SCP permits it.
 
 ## ⚠️ Consequences worth knowing
 
