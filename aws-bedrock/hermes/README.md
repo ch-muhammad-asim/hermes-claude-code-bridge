@@ -193,7 +193,7 @@ a different build than the one verifying it. Running it as a pod avoids needing 
 local Docker daemon; `--rm -it` can time out on the first pull, so create, wait, read:
 
 ```bash
-kubectl -n "$NAMESPACE" run hashgen --restart=Never --image=nousresearch/hermes-agent:v2026.8.3 --env="HERMES_DASHBOARD_PASSWORD=$HERMES_DASHBOARD_PASSWORD" --env="PYTHONPATH=/opt/hermes" --command -- /opt/hermes/.venv/bin/python -c 'import os; from plugins.dashboard_auth.basic import hash_password; print("HASH="+hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
+kubectl -n "$NAMESPACE" run hashgen --restart=Never --image=nousresearch/hermes-agent:v2026.8.27 --env="HERMES_DASHBOARD_PASSWORD=$HERMES_DASHBOARD_PASSWORD" --env="PYTHONPATH=/opt/hermes" --command -- /opt/hermes/.venv/bin/python -c 'import os; from plugins.dashboard_auth.basic import hash_password; print("HASH="+hash_password(os.environ["HERMES_DASHBOARD_PASSWORD"]))'
 ```
 
 ```bash

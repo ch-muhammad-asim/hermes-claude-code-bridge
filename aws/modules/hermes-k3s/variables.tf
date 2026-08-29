@@ -161,7 +161,7 @@ variable "helm_version" {
 variable "hermes_image" {
   description = "Hermes image used to generate the dashboard password hash. MUST equal the image in the StatefulSet, or the hash is produced by a different build than the one verifying it."
   type        = string
-  default     = "nousresearch/hermes-agent:v2026.8.3"
+  default     = "nousresearch/hermes-agent:v2026.8.27"
 }
 
 variable "ssm_prefix" {
@@ -180,4 +180,43 @@ variable "bootstrap_timeout_minutes" {
   description = "How long to wait for the node to report COMPLETE. A full bootstrap (k3s + Traefik + image pulls + rollout) typically takes 5-8 minutes."
   type        = number
   default     = 20
+}
+
+###############################################################################
+# Local access
+#
+# What turns `terragrunt apply` into "the cluster is ready to use": the kubeconfig
+# lands on this machine and the credentials print to the terminal.
+###############################################################################
+
+variable "write_local_kubeconfig" {
+  description = "Download the node's kubeconfig to this machine at the end of a successful apply."
+  type        = bool
+  default     = true
+}
+
+variable "local_kubeconfig_path" {
+  description = "Where to write it. A dedicated file rather than ~/.kube/config on purpose - kubectl can then never target the wrong cluster by accident."
+  type        = string
+  default     = "~/.kube/hermes-k3s"
+}
+
+variable "kubeconfig_context_name" {
+  description = "Rename k3s's generic `default` context to something unmistakable. Skipped silently if kubectl is not on PATH."
+  type        = string
+  default     = "hermes-k3s"
+}
+
+variable "show_credentials_in_output" {
+  description = <<-EOT
+    Print the dashboard password as a Terraform output as well as in the apply banner.
+
+    TRADEOFF: a Terraform output is persisted in state. State here is S3 + SSE-KMS,
+    versioned and private, which is fine for a sandbox - but set this to false for
+    anything long-lived and read the password from SSM instead (see
+    `credentials_command`). The apply banner prints it either way, and the banner
+    does not touch state.
+  EOT
+  type        = bool
+  default     = true
 }

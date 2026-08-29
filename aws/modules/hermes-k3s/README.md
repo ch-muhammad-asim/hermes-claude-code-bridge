@@ -161,7 +161,7 @@ runs (`hermes_image`) — a hash from a different build will not verify.
 | `manifests_ref` | `main` | Pin to a tag for a reproducible rebuild |
 | `api_allowed_cidrs` | `[]` | Fails closed. Set your egress `/32` |
 | `traefik_chart_version` | `41.3.0` | CRDs installed from the same version, so they cannot drift |
-| `hermes_image` | `nousresearch/hermes-agent:v2026.8.3` | Must equal the StatefulSet's image |
+| `hermes_image` | `nousresearch/hermes-agent:v2026.8.27` | Must equal the StatefulSet's image |
 | `bootstrap_timeout_minutes` | `20` | A full bootstrap typically takes 5–8 minutes |
 
 ## 🔒 Security posture

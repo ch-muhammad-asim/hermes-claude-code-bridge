@@ -72,3 +72,44 @@ output "deployed_overlay" {
   description = "Kustomize overlay the node applied. Must stay aligned with model_id."
   value       = var.deploy_hermes ? var.hermes_overlay : "none (deploy_hermes = false)"
 }
+
+###############################################################################
+# Credentials and local access
+###############################################################################
+
+output "dashboard_username" {
+  description = "Hermes dashboard username."
+  value       = "admin"
+}
+
+output "dashboard_password" {
+  description = <<-EOT
+    Generated dashboard password, shown on the terminal after apply.
+
+    nonsensitive() is deliberate: Terraform would otherwise refuse to print a value
+    sourced from SSM. That means it IS persisted in state (S3 + SSE-KMS, versioned,
+    private). Set show_credentials_in_output = false for anything long-lived and use
+    `credentials_command` instead - the apply banner still prints it, and the banner
+    never touches state.
+  EOT
+  value = (
+    var.deploy_hermes && var.show_credentials_in_output
+    ? nonsensitive(data.aws_ssm_parameter.dashboard_password[0].value)
+    : "hidden - run the command in `credentials_command`"
+  )
+}
+
+output "kubeconfig_path" {
+  description = "Where the kubeconfig was written on this machine."
+  value       = var.write_local_kubeconfig ? var.local_kubeconfig_path : "not downloaded (write_local_kubeconfig = false)"
+}
+
+output "use_cluster" {
+  description = "Copy-paste to start using the cluster."
+  value       = "export KUBECONFIG=${var.local_kubeconfig_path} && kubectl get pods -A"
+}
+
+output "reach_dashboard_by_ip" {
+  description = "Reach the dashboard before DNS points at the node."
+  value       = "curl -sk --resolve hermes.saqlainmushtaq.com:443:${aws_instance.node.public_ip} https://hermes.saqlainmushtaq.com/health"
+}

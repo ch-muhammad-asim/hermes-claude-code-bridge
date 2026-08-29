@@ -316,3 +316,90 @@ resource "terraform_data" "bootstrap_gate" {
     EOT
   }
 }
+
+###############################################################################
+# Local access
+#
+# Runs only after bootstrap_gate has seen COMPLETE, so the kubeconfig it downloads
+# is guaranteed to point at a cluster that is actually serving.
+#
+# Re-runs whenever the instance is replaced (new IP => new kubeconfig). On a no-op
+# apply it does not re-run, which is why the same values are also exposed as
+# outputs and as `credentials_command`.
+###############################################################################
+
+resource "terraform_data" "local_access" {
+  count = var.write_local_kubeconfig ? 1 : 0
+
+  depends_on       = [terraform_data.bootstrap_gate]
+  triggers_replace = [aws_instance.node.id]
+
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    environment = {
+      BUCKET        = var.kubeconfig_bucket
+      KUBECFG_KEY   = var.kubeconfig_key
+      REGION        = var.region
+      DEST          = var.local_kubeconfig_path
+      CTX           = var.kubeconfig_context_name
+      SSM_PREFIX    = var.ssm_prefix
+      PUBLIC_IP     = aws_instance.node.public_ip
+      DEPLOY_HERMES = var.deploy_hermes ? "true" : "false"
+    }
+    command = <<-EOT
+      set -uo pipefail
+      dest="$${DEST/#\~/$HOME}"
+      mkdir -p "$(dirname "$dest")"
+
+      if ! aws s3 cp "s3://$BUCKET/$KUBECFG_KEY" "$dest" --region "$REGION" >/dev/null; then
+        echo "ERROR: could not download the kubeconfig from s3://$BUCKET/$KUBECFG_KEY" >&2
+        exit 1
+      fi
+      chmod 600 "$dest"
+
+      # k3s names every context "default"; rename so it is unmistakable in a
+      # multi-cluster shell. Harmless if kubectl is not installed.
+      if command -v kubectl >/dev/null 2>&1; then
+        KUBECONFIG="$dest" kubectl config rename-context default "$CTX" >/dev/null 2>&1 || true
+      fi
+
+      pw="(set deploy_hermes = true to create one)"
+      if [ "$DEPLOY_HERMES" = "true" ]; then
+        pw=$(aws ssm get-parameter --name "$SSM_PREFIX/dashboard-password" \
+               --with-decryption --region "$REGION" \
+               --query Parameter.Value --output text 2>/dev/null) || pw="(unavailable - read it with credentials_command)"
+      fi
+
+      cat <<BANNER
+
+      ════════════════════════════════════════════════════════════════════
+       Hermes on k3s is ready
+      ════════════════════════════════════════════════════════════════════
+       Dashboard   https://hermes.saqlainmushtaq.com/
+       Username    admin
+       Password    $pw
+
+       Node IP     $PUBLIC_IP
+       Kubeconfig  $dest
+
+       Use the cluster:
+         export KUBECONFIG=$dest
+         kubectl get pods -A
+
+       DNS not pointed yet? Reach it by IP:
+         curl -sk --resolve hermes.saqlainmushtaq.com:443:$PUBLIC_IP https://hermes.saqlainmushtaq.com/health
+      ════════════════════════════════════════════════════════════════════
+
+      BANNER
+    EOT
+  }
+}
+
+# Read back only for the outputs below. Deliberately NOT used by the banner, which
+# reads SSM at run time and therefore never persists the value.
+data "aws_ssm_parameter" "dashboard_password" {
+  count = var.deploy_hermes && var.show_credentials_in_output ? 1 : 0
+
+  name       = "${var.ssm_prefix}/dashboard-password"
+  depends_on = [terraform_data.bootstrap_gate]
+}
