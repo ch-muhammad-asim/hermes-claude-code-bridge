@@ -3,11 +3,12 @@
 ###############################################################################
 
 include "root" {
-  path = find_in_parent_folders("root.hcl")
+  path   = find_in_parent_folders("root.hcl")
+  expose = true
 }
 
 terraform {
-  source = "${get_parent_terragrunt_dir()}/../modules//vpc"
+  source = "${include.root.locals.modules_dir}//vpc"
 }
 
 inputs = {

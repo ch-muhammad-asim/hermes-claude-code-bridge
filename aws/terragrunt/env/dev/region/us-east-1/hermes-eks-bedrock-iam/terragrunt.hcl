@@ -10,11 +10,12 @@
 ###############################################################################
 
 include "root" {
-  path = find_in_parent_folders("root.hcl")
+  path   = find_in_parent_folders("root.hcl")
+  expose = true
 }
 
 terraform {
-  source = "${get_parent_terragrunt_dir()}/../modules//hermes-eks-bedrock-iam"
+  source = "${include.root.locals.modules_dir}//hermes-eks-bedrock-iam"
 }
 
 dependency "eks" {

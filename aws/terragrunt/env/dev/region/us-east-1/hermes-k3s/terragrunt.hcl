@@ -12,11 +12,12 @@
 ###############################################################################
 
 include "root" {
-  path = find_in_parent_folders("root.hcl")
+  path   = find_in_parent_folders("root.hcl")
+  expose = true
 }
 
 terraform {
-  source = "${get_parent_terragrunt_dir()}/../modules//hermes-k3s"
+  source = "${include.root.locals.modules_dir}//hermes-k3s"
 }
 
 dependency "vpc" {
@@ -49,7 +50,10 @@ inputs = {
 
   # The node publishes its kubeconfig here (single-object s3:PutObject grant), so
   # reaching the cluster needs no SSH key and no inbound 22.
-  kubeconfig_bucket = "cloudgeeks-eks-blueprints-tfstate-637423440646"
+  # Derived from account.hcl, NOT hardcoded. A hardcoded bucket silently points a
+  # new sandbox's node at the previous account's bucket: k3s comes up, then every
+  # upload fails with NoSuchBucket and the apply times out with no status object.
+  kubeconfig_bucket = include.root.locals.state_bucket
   kubeconfig_key    = "k3s/kubeconfig"
 
   # Claude Sonnet 4.5 is the intended default, but THIS sandbox account has no

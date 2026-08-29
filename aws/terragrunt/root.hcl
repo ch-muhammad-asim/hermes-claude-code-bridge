@@ -24,6 +24,27 @@ locals {
 
   cluster_name = local.env_vars.locals.cluster_name
 
+  ###########################################################################
+  # Module root, resolved once
+  #
+  # root.hcl lives at <blueprint>/terragrunt/root.hcl, so two dirname() hops
+  # land on the blueprint directory that also holds modules/. Units then say:
+  #
+  #   include "root" {
+  #     path   = find_in_parent_folders("root.hcl")
+  #     expose = true
+  #   }
+  #   terraform { source = "${include.root.locals.modules_dir}//vpc" }
+  #
+  # rather than counting ../ hops from wherever they happen to sit. That
+  # relative counting is what broke when aws/ was vendored into a larger repo:
+  # get_repo_root() started resolving to the OUTER repo, and every unit failed
+  # to init. Defining the path once, relative to this file, survives both
+  # vendoring and any change to the env/region directory depth.
+  ###########################################################################
+  blueprint_dir = dirname(dirname(find_in_parent_folders("root.hcl")))
+  modules_dir   = "${local.blueprint_dir}/modules"
+
   common_tags = {
     Environment = local.environment
     Terraform   = "true"
@@ -41,15 +62,25 @@ locals {
 remote_state {
   backend = "s3"
 
-  config = {
-    bucket       = local.state_bucket
-    key          = "${path_relative_to_include()}/terraform.tfstate"
-    region       = local.aws_region
-    encrypt      = true
-    use_lockfile = true
+  # kms_key_id is merged in only when a CMK is configured. Sending an empty or
+  # nonexistent alias makes every state write fail with NotFoundException.
+  config = merge(
+    {
+      bucket       = local.state_bucket
+      key          = "${path_relative_to_include()}/terraform.tfstate"
+      region       = local.aws_region
+      encrypt      = true
+      use_lockfile = true
 
-    kms_key_id = local.state_kms_key
-  }
+      s3_bucket_tags = {
+        Name        = "terraform-state"
+        Environment = local.environment
+        ManagedBy   = "terragrunt"
+        Blueprint   = local.cluster_name
+      }
+    },
+    local.state_kms_key != "" ? { kms_key_id = local.state_kms_key } : {},
+  )
 
   generate = {
     path      = "backend.tf"
