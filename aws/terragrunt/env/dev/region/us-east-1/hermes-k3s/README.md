@@ -7,6 +7,24 @@ onto it. One command, and it returns only when the stack actually works.
 
 Run from `aws/terragrunt/env/dev/region/us-east-1`.
 
+**Step 0 — only when the sandbox is new or reissued.** `.terragrunt-cache/` holds a
+generated `backend.tf` pointing at the *previous* account's state bucket, and
+dependency resolution reads that cached directory. Skipping this produces a
+`NoSuchBucket` for an account you are no longer in, followed by
+`There is no variable named "dependency"` as the cascade:
+
+```bash
+find . -type d -name '.terragrunt-cache' -exec rm -rf {} + 2>/dev/null
+```
+
+```bash
+export TG_BACKEND_BOOTSTRAP=true
+```
+
+That second line lets Terragrunt create the state bucket on first use. Everything
+else — account id, bucket name, your egress CIDR — is discovered, so no file needs
+editing for a new sandbox.
+
 **Step 1 — network** (skip if the VPC already exists):
 
 ```bash

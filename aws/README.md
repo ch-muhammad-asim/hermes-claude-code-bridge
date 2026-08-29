@@ -173,6 +173,18 @@ association would fail with `ResourceNotFoundException: No cluster found`.
 
 Run from `terragrunt/env/dev/region/us-east-1`.
 
+New or reissued sandbox? Clear the stale cache and enable backend bootstrap first —
+`.terragrunt-cache/` pins the previous account's state bucket, which surfaces as
+`NoSuchBucket` plus a misleading `no variable named "dependency"`:
+
+```bash
+find . -type d -name '.terragrunt-cache' -exec rm -rf {} + 2>/dev/null
+```
+
+```bash
+export TG_BACKEND_BOOTSTRAP=true
+```
+
 ```bash
 terragrunt apply --working-dir vpc
 ```

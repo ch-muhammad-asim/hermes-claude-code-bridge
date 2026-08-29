@@ -31,6 +31,13 @@ dependency "vpc" {
   mock_outputs_allowed_terraform_commands = ["validate", "plan", "init"]
 }
 
+locals {
+  operator_cidr = get_env(
+    "TG_OPERATOR_CIDR",
+    "${trimspace(run_cmd("--terragrunt-quiet", "curl", "-s", "https://checkip.amazonaws.com"))}/32",
+  )
+}
+
 inputs = {
   vpc_id = dependency.vpc.outputs.vpc_id
 
@@ -41,9 +48,13 @@ inputs = {
   cluster_name  = "cloudgeeks-k3s-dev"
   instance_type = "t3.medium"
 
-  # The Kubernetes API is reachable only from the operator's egress /32. Empty would
-  # fail closed (no rule, no kubectl) rather than exposing 6443 to the internet.
-  api_allowed_cidrs = ["182.189.178.172/32"]
+  # The Kubernetes API is reachable only from the operator's egress /32, DISCOVERED
+  # at plan time rather than pinned. A hardcoded /32 goes stale the moment you change
+  # network, and the failure is confusing: the apply succeeds and kubectl just hangs.
+  #
+  # Override for a fixed office/VPN range (and to avoid the lookup):
+  #   export TG_OPERATOR_CIDR=203.0.113.0/24
+  api_allowed_cidrs = [local.operator_cidr]
 
   # 80/443 are public by design - that is the point of the ingress.
   ingress_allowed_cidrs = ["0.0.0.0/0"]
