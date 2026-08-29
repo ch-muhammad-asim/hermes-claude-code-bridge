@@ -156,6 +156,41 @@ this blueprint — VPC, Karpenter, ALB controller IAM, OIDC — is unaffected.
 All deployment goes through Terragrunt. Run from
 `terragrunt/env/dev/region/us-east-1`.
 
+### 🎯 Which path? k3s vs EKS
+
+| | k3s — **the sandbox path** | EKS |
+|---|---|---|
+| Units, in order | `vpc` → `hermes-k3s` | `vpc` → `eks` → `hermes-eks-bedrock-iam` |
+| Traefik + Hermes | **automatic**, during the apply | manual, after the units |
+| Bedrock credentials | EC2 instance profile | EKS Pod Identity |
+| Works in a Pluralsight sandbox | ✅ | ❌ `eks:CreateCluster` denied by SCP |
+
+`hermes-eks-bedrock-iam` is **EKS-only**. `hermes-k3s` already carries the same
+Bedrock grant on its node instance profile, so do not apply both — the Pod Identity
+association would fail with `ResourceNotFoundException: No cluster found`.
+
+### 🚀 k3s path — two steps, then done
+
+Run from `terragrunt/env/dev/region/us-east-1`.
+
+```bash
+terragrunt apply --working-dir vpc
+```
+
+```bash
+terragrunt apply --working-dir hermes-k3s
+```
+
+That is the whole deployment: k3s, Traefik and the Hermes agent. The apply prints the
+dashboard URL, username and generated password, and writes the kubeconfig to
+`~/.kube/hermes-k3s`:
+
+```bash
+export KUBECONFIG=~/.kube/hermes-k3s && kubectl get pods -A
+```
+
+Details: [`hermes-k3s/README.md`](terragrunt/env/dev/region/us-east-1/hermes-k3s/README.md).
+
 ### Full command sequence
 
 ```bash
@@ -174,12 +209,16 @@ terragrunt apply --working-dir karpenter
 terragrunt apply --working-dir alb-controller-iam
 
 # Phase 5: Hermes Bedrock IAM (depends on EKS)
-terragrunt apply --working-dir hermes-bedrock-iam
+terragrunt apply --working-dir hermes-eks-bedrock-iam
 
 # Phase 6: Configure kubectl
 aws eks update-kubeconfig --region us-east-1 --name cloudgeeks-eks-dev
 kubectl get nodes
 ```
+
+> Phases 2-6 are the **EKS path**; see
+> [`hermes-eks-bedrock-iam/README.md`](terragrunt/env/dev/region/us-east-1/hermes-eks-bedrock-iam/README.md)
+> for what phase 5 grants and the manual steps that follow.
 
 > **⚠️ Phase 2 may fail** with `AccessDeniedException` on `eks:CreateCluster` if your
 > account's AWS Organizations SCP denies it. The IAM policy (`allow_all`) grants EKS

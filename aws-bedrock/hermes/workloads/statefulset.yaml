@@ -504,7 +504,7 @@ spec:
             # Claude Sonnet 4.5 is INFERENCE_PROFILE-only on Bedrock — a bare
             # anthropic.claude-sonnet-4-5-* id is rejected with a ValidationException.
             # The "us." profile is cross-region; keep it aligned with the IAM policy in
-            # aws/modules/hermes-bedrock-iam, which authorizes the underlying
+            # aws/modules/hermes-eks-bedrock-iam, which authorizes the underlying
             # foundation model in every region the profile can route to.
             - name: ANTHROPIC_MODEL
               value: us.anthropic.claude-sonnet-4-5-20250929-v1:0

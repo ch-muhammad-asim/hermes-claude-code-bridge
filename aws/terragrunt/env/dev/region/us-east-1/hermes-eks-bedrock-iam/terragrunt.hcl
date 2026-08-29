@@ -14,7 +14,7 @@ include "root" {
 }
 
 terraform {
-  source = "${get_parent_terragrunt_dir()}/../modules//hermes-bedrock-iam"
+  source = "${get_parent_terragrunt_dir()}/../modules//hermes-eks-bedrock-iam"
 }
 
 dependency "eks" {

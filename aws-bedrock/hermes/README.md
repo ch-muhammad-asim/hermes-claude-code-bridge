@@ -39,7 +39,7 @@ use the k3s path instead:
 
 | | EKS | k3s (sandbox fallback) |
 | --- | --- | --- |
-| Infra unit | `terragrunt apply --working-dir eks` + `hermes-bedrock-iam` | `terragrunt apply --working-dir hermes-k3s` |
+| Infra unit | `terragrunt apply --working-dir eks` + `hermes-eks-bedrock-iam` | `terragrunt apply --working-dir hermes-k3s` |
 | Bedrock credentials | EKS Pod Identity association | EC2 instance profile (IMDS) |
 | Apply | `kubectl apply -k hermes` | `kubectl apply -k overlays/k3s` |
 | StorageClass | `gp3` (ebs.csi.aws.com) | `local-path` (patched by the overlay) |
@@ -61,7 +61,7 @@ Pod Identity on EKS and IMDS on EC2, so nothing in the application changes.
 - A Kubernetes cluster (see above) with the Traefik controller watching the
   `traefik-external` IngressClass.
 - On EKS: the `eks-pod-identity-agent` add-on (installed by `aws/modules/eks`) and the
-  `hermes-bedrock-iam` Terragrunt unit applied.
+  `hermes-eks-bedrock-iam` Terragrunt unit applied.
 - On EC2/k3s: `http_put_response_hop_limit = 2` on the instance's metadata options.
   **This is not optional** — pod traffic to IMDS traverses the host network namespace
   and decrements the hop count, so at the default limit of 1 every pod gets a
@@ -119,7 +119,7 @@ terragrunt apply --working-dir eks
 ```
 
 ```bash
-terragrunt apply --working-dir hermes-bedrock-iam
+terragrunt apply --working-dir hermes-eks-bedrock-iam
 ```
 
 ```bash
@@ -306,7 +306,7 @@ Do not leave a public dashboard on a self-signed cert longer than a demo.
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | Bridge exits `NoCredentialsError` / `NoRegionError` | On EC2: IMDS hop limit is 1, so pods cannot reach it. Or `AWS_REGION` unset | Set `http_put_response_hop_limit = 2`; `AWS_REGION` is set on the sidecar in the manifest |
-| `AccessDeniedException` on InvokeModel | Pod Identity association missing, or the policy omits the cross-region foundation-model ARNs a `us.` profile fails over to | Apply `hermes-bedrock-iam`; confirm all three regions are in the policy |
+| `AccessDeniedException` on InvokeModel | Pod Identity association missing, or the policy omits the cross-region foundation-model ARNs a `us.` profile fails over to | Apply `hermes-eks-bedrock-iam`; confirm all three regions are in the policy |
 | `ValidationException: ... use an inference profile` | A bare foundation-model id was used | Use `us.anthropic.claude-sonnet-4-5-20250929-v1:0` |
 | PVC stuck `Pending` | `gp3` StorageClass on a cluster without the EBS CSI driver (e.g. k3s) | Apply `overlays/k3s`, which switches it to `local-path` |
 | Pod stuck `ContainerCreating` on a missing Secret | Only `hermes-agent-secrets` is mandatory | Create it (step 3); the GitHub App Secret is `optional: true` |

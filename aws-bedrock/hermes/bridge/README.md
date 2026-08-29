@@ -32,7 +32,7 @@ The bridge needs exactly two things, and no static credential:
 > whichever region it lands. Grant only the profile and the first failover returns
 > `AccessDeniedException` — intermittently, which makes it miserable to debug.
 
-Managed for you by `aws/modules/hermes-bedrock-iam` (EKS Pod Identity) or
+Managed for you by `aws/modules/hermes-eks-bedrock-iam` (EKS Pod Identity) or
 `aws/modules/hermes-k3s` (EC2 instance profile).
 
 ## 💻 Local run

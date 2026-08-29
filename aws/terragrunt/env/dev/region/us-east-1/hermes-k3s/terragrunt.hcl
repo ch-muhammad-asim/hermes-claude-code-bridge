@@ -7,7 +7,7 @@
 # permitted; everything layered on top is identical either way.
 #
 # Consumes the vpc unit's public subnet, and carries the Bedrock invoke permissions
-# that hermes-bedrock-iam grants on EKS - on EC2 they ride on the instance profile,
+# that hermes-eks-bedrock-iam grants on EKS - on EC2 they ride on the instance profile,
 # so the Hermes bridge needs no code change.
 ###############################################################################
 

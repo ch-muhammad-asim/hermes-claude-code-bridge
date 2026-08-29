@@ -150,7 +150,7 @@ That has an IAM consequence that costs people hours: a `us.` profile may route
 inference to **us-east-1, us-east-2 or us-west-2**, and the policy must authorize the
 underlying foundation model in *every* one of those regions plus the profile ARN
 itself. Authorize only the profile and the first cross-region failover returns
-`AccessDeniedException`. [`aws/modules/hermes-bedrock-iam`](../aws/modules/hermes-bedrock-iam)
+`AccessDeniedException`. [`aws/modules/hermes-eks-bedrock-iam`](../aws/modules/hermes-eks-bedrock-iam)
 does this correctly.
 
 ### ⚙️ Configuration
@@ -367,7 +367,7 @@ Infra first, then the agent — the full runbook is in
 
 ```bash
 # 1. Infra (Terragrunt)
-#      vpc  ->  eks + hermes-bedrock-iam      (when SCP permits eks:CreateCluster)
+#      vpc  ->  eks + hermes-eks-bedrock-iam      (when SCP permits eks:CreateCluster)
 #      vpc  ->  hermes-k3s                    (current: SCP blocks EKS)
 # 2. Traefik   pinned chart 41.3.0, CRDs first, traefik-external IngressClass
 # 3. Secrets   envsubst < hermes/secrets/secret.template.yaml | kubectl apply -f -

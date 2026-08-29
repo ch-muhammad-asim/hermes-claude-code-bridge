@@ -81,7 +81,7 @@ resource "aws_iam_role" "node" {
 }
 
 data "aws_iam_policy_document" "node" {
-  # Identical scope to modules/hermes-bedrock-iam: invoke only, on one model.
+  # Identical scope to modules/hermes-eks-bedrock-iam: invoke only, on one model.
   statement {
     sid    = "InvokeConfiguredClaudeModel"
     effect = "Allow"

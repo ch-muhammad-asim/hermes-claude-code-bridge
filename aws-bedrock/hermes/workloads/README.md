@@ -29,7 +29,7 @@ would deadlock on the RWO volume.
 - **`ANTHROPIC_MODEL` must stay an inference profile** (`us.anthropic.claude-sonnet-4-5-…`).
   Claude Sonnet 4.5 is `INFERENCE_PROFILE`-only on Bedrock; a bare foundation-model id
   returns `ValidationException`. It must also match the IAM policy in
-  `../../../aws/modules/hermes-bedrock-iam`.
+  `../../../aws/modules/hermes-eks-bedrock-iam`.
 - **`context_length: 200000`** is pinned because Hermes cannot probe a custom bridge and
   would default to 256k — *overstating* Sonnet 4.5's window and getting requests rejected
   mid-thread. The 1M window is a separate opt-in, not the default.
