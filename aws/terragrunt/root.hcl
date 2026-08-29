@@ -133,6 +133,41 @@ generate "account_guard" {
   EOF
 }
 
+###############################################################################
+# Backend bootstrap
+#
+# Terragrunt 1.x no longer creates the state bucket implicitly - it wants
+# --backend-bootstrap (or TG_BACKEND_BOOTSTRAP=true) on every command. Relying on
+# an env var means a fresh clone or a reissued sandbox fails on the first init
+# with "NoSuchBucket", which is exactly the toil this blueprint removes elsewhere.
+#
+# This hook runs `terragrunt backend bootstrap` for the current unit immediately
+# before `terraform init`, so the bucket is created (versioned, SSE-KMS,
+# public-access-blocked, TLS-only) by Terragrunt itself on first use, and is a
+# no-op every time after. `backend bootstrap` does not invoke `init`, so there is
+# no recursion.
+#
+# Best-effort (`|| true`) on purpose. `backend bootstrap` re-parses the unit
+# WITHOUT dependency resolution, so on a unit carrying a `dependency` block it
+# aborts with `There is no variable named "dependency"`. There is no flag to
+# disable that parsing. Letting the hook fail softly there is correct rather than
+# merely convenient: every such unit depends on `vpc`, `vpc` has no dependencies
+# and therefore always bootstraps successfully, and it is always applied first -
+# so by the time a dependent unit initialises, the bucket already exists.
+#
+# The one gap: running a dependent unit standalone in a brand-new account before
+# `vpc`. That still fails, but with the plain, accurate `NoSuchBucket` error and
+# Terragrunt's own hint, not a misleading parse error.
+###############################################################################
+terraform {
+  before_hook "bootstrap_backend" {
+    commands = ["init"]
+    execute = ["bash", "-c",
+      "terragrunt backend bootstrap --non-interactive --working-dir '${get_terragrunt_dir()}' >/dev/null 2>&1 || true",
+    ]
+  }
+}
+
 # Retry the handful of AWS failures that are genuinely transient.
 errors {
   retry "transient_aws" {

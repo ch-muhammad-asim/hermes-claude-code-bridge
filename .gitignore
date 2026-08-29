@@ -10,6 +10,32 @@ venv/
 # terragrunt.hcl out of version control.
 /env/
 
+# ── Terraform / Terragrunt ───────────────────────────────────────────────────
+# Also declared in aws/.gitignore. Repeated here deliberately: these artifacts are
+# state and credentials-adjacent, and a module or unit added outside aws/ must not
+# depend on someone remembering to copy the rules. `.terragrunt-cache/` in
+# particular holds a GENERATED backend.tf containing the state bucket name.
+.terraform/
+.terraform.lock.hcl
+.terragrunt-cache/
+*.tfstate
+*.tfstate.*
+*.tfstate.*.backup
+*.tfplan
+tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars
+terraform.tfvars.json
+
 # ── Secrets / local config — never commit real values ────────────────────────
 # Anything whose name contains "secret" is excluded, so a rendered Secret picks up
 # the rule no matter what it is called (secret.yaml, omniroute-secrets.yaml,
