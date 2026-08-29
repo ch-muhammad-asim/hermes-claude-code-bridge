@@ -301,6 +301,53 @@ two which are deliberate:
 | GitHub App Secret | Required (pod blocks without it) | **Optional** (`optional: true`) |
 | Write access | None — strictly read-only | **Scoped remediation** in bound namespaces |
 
+## ⚠️ Bedrock model access is per-account — Sonnet 4.5 may be unavailable
+
+Claude Sonnet 4.5 is this deployment's designed default and remains the default in the
+base manifests. **Some Pluralsight AI sandbox accounts are provisioned without an AWS
+Marketplace subscription for it**, and the subscription cannot be added from inside the
+account:
+
+```text
+InvokeModel                    -> AccessDeniedException: Model access is denied ...
+                                  required AWS Marketplace actions
+                                  (aws-marketplace:ViewSubscriptions, aws-marketplace:Subscribe)
+
+CreateFoundationModelAgreement -> AccessDeniedException ... explicit deny in a
+                                  service control policy: p-sdxy6x4w
+```
+
+The second deny is decisive: accepting the model agreement is precisely how you would
+clear the first, and a *different* SCP forbids it — matching the sandbox documentation's
+"Cannot enable or modify model access agreements".
+
+**Diagnose it correctly.** The same error appears for the account's own IAM user, which
+carries `allow_all`. That proves it is account-level model access, **not** a gap in the
+agent's role policy — do not go rewriting the IAM module:
+
+```bash
+aws bedrock-runtime invoke-model --model-id us.anthropic.claude-sonnet-4-5-20250929-v1:0 --content-type application/json --accept application/json --body '{"anthropic_version":"bedrock-2023-05-31","max_tokens":1,"messages":[{"role":"user","content":"hi"}]}' /dev/stdout
+```
+
+Find what the account *can* invoke — access varies between sandbox instances:
+
+```bash
+for m in us.anthropic.claude-sonnet-4-5-20250929-v1:0 us.anthropic.claude-haiku-4-5-20251001-v1:0 anthropic.claude-3-haiku-20240307-v1:0; do echo "$m"; done
+```
+
+**Fallback:** Claude Haiku 4.5 is subscribed where Sonnet 4.5 is not, and shares its 200k
+context window — so the `context_length` pin and I/O limits need no change. Switching
+takes **two** coordinated edits, because the node role authorizes one specific model:
+
+1. `model_id` / `foundation_model_id` in `../aws/terragrunt/env/dev/region/us-east-1/hermes-k3s/terragrunt.hcl`, then `terragrunt apply` (updates the IAM policy in place — no instance replacement).
+2. `kubectl apply -k overlays/k3s-haiku-4-5` instead of `overlays/k3s`.
+
+Change only one and `InvokeModel` fails with `AccessDeniedException` on the ARN.
+
+Neither `SOUL.md` nor the skills hardcode a model version — the agent cannot introspect
+what the bridge is bound to, so a hardcoded version would silently drift. The manifest is
+the single source of truth.
+
 ## ⚠️ EKS SCP denial — current state
 
 The sandbox's AWS Organizations SCP (`p-2nwbuy01`) explicitly denies `eks:CreateCluster`.

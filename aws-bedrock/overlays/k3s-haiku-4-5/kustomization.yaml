@@ -1,0 +1,65 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── k3s + Claude Haiku 4.5 ─────────────────────────────────────────────────────
+# Same as ../k3s, but running Claude Haiku 4.5 instead of the intended Sonnet 4.5.
+#
+# WHY THIS EXISTS
+# Sonnet 4.5 is the deployment's designed default and stays the default in the base.
+# Some Pluralsight AI sandbox accounts are provisioned WITHOUT an AWS Marketplace
+# subscription for it, and the subscription cannot be added from inside the account:
+#
+#   InvokeModel  -> AccessDeniedException: Model access is denied ... required AWS
+#                   Marketplace actions (aws-marketplace:ViewSubscriptions,
+#                   aws-marketplace:Subscribe)
+#   CreateFoundationModelAgreement
+#                -> AccessDeniedException ... explicit deny in a service control
+#                   policy: p-sdxy6x4w
+#
+# The second deny is the decisive one: accepting the model agreement is exactly how
+# you would fix the first, and the SCP forbids it. The same error appears for the
+# account's own IAM user, which carries allow_all - so it is account-level model
+# access, NOT a gap in the agent's role policy.
+#
+# Haiku 4.5 IS subscribed in those accounts and works. It shares Sonnet 4.5's 200k
+# context window, so the context_length pin and the I/O limits in the base need no
+# change - only the model id moves.
+#
+# The matching IAM change lives in the terragrunt input (model_id /
+# foundation_model_id in aws/terragrunt/.../hermes-k3s), because the node role
+# authorizes one specific model. Change both together or InvokeModel returns
+# AccessDeniedException on the ARN.
+#
+#   kubectl apply -k aws-bedrock/overlays/k3s-haiku-4-5
+#
+# Use ../k3s wherever the Sonnet 4.5 subscription exists.
+resources:
+  - ../k3s
+
+patches:
+  - target:
+      group: apps
+      version: v1
+      kind: StatefulSet
+      name: hermes-agent
+    patch: |
+      apiVersion: apps/v1
+      kind: StatefulSet
+      metadata:
+        name: hermes-agent
+        namespace: devops-agent
+      spec:
+        template:
+          spec:
+            initContainers:
+              # Re-renders config.yaml (model.default + the provider's default_model)
+              # from this env var on every pod start.
+              - name: init-hermes-config
+                env:
+                  - name: BEDROCK_CLAUDE_MODEL
+                    value: us.anthropic.claude-haiku-4-5-20251001-v1:0
+            containers:
+              - name: bedrock-claude-bridge
+                env:
+                  - name: ANTHROPIC_MODEL
+                    value: us.anthropic.claude-haiku-4-5-20251001-v1:0

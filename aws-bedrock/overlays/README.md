@@ -7,9 +7,14 @@ for.
 | Overlay | For | Patches |
 |---|---|---|
 | `k3s/` | Single-node k3s on EC2 (`../../aws/modules/hermes-k3s`) | Deletes the `gp3` StorageClass; repoints the PVC at `local-path` |
+| `k3s-haiku-4-5/` | The same, in an account with **no Sonnet 4.5 Marketplace subscription** | Builds on `k3s/`; swaps the model id to Claude Haiku 4.5 on the bridge and the config init container |
 
 ```bash
 kubectl apply -k k3s
+```
+
+```bash
+kubectl apply -k k3s-haiku-4-5
 ```
 
 ## 🤔 Why k3s needs an overlay at all — and why it needs so little

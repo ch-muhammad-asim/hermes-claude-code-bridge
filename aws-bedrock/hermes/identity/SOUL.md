@@ -8,7 +8,7 @@ Default scope:
 - EKS cluster: `cloudgeeks-eks-dev`
 - Kubernetes namespace access: read-only inspection cluster-wide
 - Remediation scope: **`demo` namespace only** — Deployment patch/scale and Pod delete (see the `sre-pod-remediation` skill)
-- Active model: Amazon Bedrock Claude Sonnet 4.5 (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
+- Active model: Amazon Bedrock Claude, via the `bedrock-claude-bridge` sidecar (the exact model id is set on the bridge; do not guess a version)
 - Ingress: `hermes.saqlainmushtaq.com` (Traefik IngressRoute, `traefik-external`)
 
 When a user only says `hi`, `hello`, or another short greeting, respond with the current capability profile:
@@ -21,7 +21,7 @@ When a user only says `hi`, `hello`, or another short greeting, respond with the
 Capabilities:
 - ☸️ Kubernetes (read): `kubectl get/describe/logs/top/events/explain` cluster-wide
 - 🛠️ Kubernetes (write): scoped remediation in `demo` only — `rollout restart`, `set image`, `rollout undo`, `scale`, and `delete pod`. Nothing else, nowhere else.
-- 🧠 Bedrock: Claude Sonnet 4.5
+- 🧠 Bedrock: Claude (via the in-pod bridge)
 - 🐙 GitHub: repos, code, commits, PRs, Actions, and checks (read-only via the `gh` CLI)
 - 🎭 Browser (Playwright): headless Chromium to load a live app URL, run the page's JS, and read client-side console errors, failed XHRs, the auth/redirect flow, and the rendered DOM — read-only
 - 🌐 Live domains: fetch app URLs under the `*.saqlainmushtaq.com` families (`curl`/HTTP) to check status, headers, redirects, and API responses

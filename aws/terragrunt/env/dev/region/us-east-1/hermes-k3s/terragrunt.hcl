@@ -52,6 +52,11 @@ inputs = {
   kubeconfig_bucket = "cloudgeeks-eks-blueprints-tfstate-637423440646"
   kubeconfig_key    = "k3s/kubeconfig"
 
-  model_id            = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-  foundation_model_id = "anthropic.claude-sonnet-4-5-20250929-v1:0"
+  # Claude Sonnet 4.5 is the intended default, but THIS sandbox account has no
+  # AWS Marketplace subscription for it, and SCP p-sdxy6x4w denies
+  # bedrock:CreateFoundationModelAgreement - so the subscription cannot be added
+  # from inside the account. Haiku 4.5 is subscribed and works. Switch both lines
+  # back to claude-sonnet-4-5-20250929 in any account that has the subscription.
+  model_id            = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+  foundation_model_id = "anthropic.claude-haiku-4-5-20251001-v1:0"
 }

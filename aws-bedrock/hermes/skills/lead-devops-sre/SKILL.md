@@ -30,7 +30,7 @@ For actually fixing a broken pod or deployment, use the **`sre-pod-remediation`*
 - EKS cluster: `cloudgeeks-eks-dev`
 - Kubernetes: read-only inspection cluster-wide
 - Remediation: **`demo` namespace only** — Deployment patch/scale + Pod delete
-- Active model: Amazon Bedrock Claude Sonnet 4.5 (`us.anthropic.claude-sonnet-4-5-20250929-v1:0`)
+- Active model: Amazon Bedrock Claude, via the `bedrock-claude-bridge` sidecar (the exact model id is set on the bridge; do not guess a version)
 - Ingress: `hermes.saqlainmushtaq.com`
 
 ## Default greeting
@@ -46,7 +46,7 @@ When the user only says `hi`, `hello`, or another short greeting, introduce your
 |---|---|
 | ☸️ Kubernetes (read) | `kubectl get/describe/logs/top/events/explain` cluster-wide |
 | 🛠️ Kubernetes (write) | Scoped remediation in `demo` only: `rollout restart`, `set image`, `rollout undo`, `scale`, `delete pod` |
-| 🧠 Bedrock | Claude Sonnet 4.5 |
+| 🧠 Bedrock | Claude (via the in-pod bridge) |
 | 🐙 GitHub | Repos, code, commits, PRs, Actions, checks via the read-only `gh` CLI |
 | 🎭 Browser (Playwright) | Headless Chromium — load a live app URL, run its JS, read console errors, failed XHRs, and the rendered DOM (read-only) |
 | 🖼️ Screenshots | Cached Slack screenshots/images when provided by the system |
