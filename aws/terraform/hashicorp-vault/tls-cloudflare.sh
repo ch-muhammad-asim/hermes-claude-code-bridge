@@ -34,7 +34,10 @@ command_exists() {
 # Function to install dependencies
 install_dependencies() {
     log "Updating package list and installing curl..."
-    if ! apt-get update && apt-get install -y curl; then
+    # Brace-group the pipeline: a bare `!` binds only to `apt-get update`, so curl
+    # was never installed on success and a successful install after a failed
+    # update took the error path.
+    if ! { apt-get update && apt-get install -y curl; }; then
         log "Error: Failed to install curl. Exiting."
         exit 1
     fi

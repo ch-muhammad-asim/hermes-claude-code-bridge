@@ -36,7 +36,7 @@ cd opencode/hermes-desktop
 ./install-opencode-bridge.sh
 ```
 
-The bridge is now listening at **`http://127.0.0.1:18282/v1`** and restarts automatically at every login. 🎉
+The bridge is now listening at **`http://127.0.0.1:18383/v1`** and restarts automatically at every login. 🎉
 
 Prefer not to install a service? Just run it in the foreground:
 
@@ -58,7 +58,7 @@ OPENCODE_BRIDGE_CWD=~/code ./run-bridge.sh   # point OpenCode's tools at a proje
 Raw curl:
 
 ```bash
-curl -s http://127.0.0.1:18282/v1/chat/completions \
+curl -s http://127.0.0.1:18383/v1/chat/completions \
   -H 'content-type: application/json' \
   -d '{"model":"opencode/mimo-v2.5-free","messages":[{"role":"user","content":"Say hello from OpenCode"}]}'
 ```
@@ -67,7 +67,7 @@ Python (OpenAI SDK):
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:18282/v1", api_key="not-needed")
+client = OpenAI(base_url="http://127.0.0.1:18383/v1", api_key="not-needed")
 print(client.chat.completions.create(
     model="opencode/mimo-v2.5-free",
     messages=[{"role": "user", "content": "Say hello from OpenCode"}],
@@ -84,7 +84,7 @@ Use **Settings → Providers → Custom Endpoints → `+ New endpoint`** — *no
 |-------|-------|
 | Name | `opencode` (anything) |
 | Provider ID | `opencode` — or `opencode-bridge`; see ⚠️ below |
-| Endpoint URL | `http://127.0.0.1:18282/v1` |
+| Endpoint URL | `http://127.0.0.1:18383/v1` |
 | Default Model | `opencode/mimo-v2.5-free` |
 | API Key | *(leave blank — unless you set `OPENCODE_BRIDGE_API_KEY`)* |
 | Context | `Auto` |
@@ -96,13 +96,13 @@ Then — **in this order** — click **⚡ Test**, *then* **💾 Save**. Reopen 
 ### ⚠️ Three gotchas that cost us a debugging round
 
 1. **`Test` before `Save`, always.** `Save` persists the catalogue that `Test` discovered. Save without testing and Hermes writes only the one model you typed — every picker then shows a **single-entry dropdown**, which looks exactly like a stale cache but isn't. Nothing to clear: just Test → Save again.
-2. **Watch the port.** The Claude Code bridge in this repo runs on `:18181`/`:18182`; this one is `:18282`. Editing the Claude endpoint's URL and expecting OpenCode models in its dropdown won't work — its saved catalogue still belongs to the old endpoint until you Test again. Create a **separate** endpoint instead, so you can flip between them with **Use**.
+2. **Watch the port.** The Claude Code bridge in this repo runs on `:18181`/`:18182`; this one is `:18383`. Editing the Claude endpoint's URL and expecting OpenCode models in its dropdown won't work — its saved catalogue still belongs to the old endpoint until you Test again. Create a **separate** endpoint instead, so you can flip between them with **Use**.
 3. **Deleting an endpoint un-configures Hermes.** Hermes clears `model.provider` / `base_url` / `key_env` when the active endpoint is deleted, leaving `model.default` dangling and no provider at all. If chats break right after a delete, that's why — Save + **Use** an endpoint to re-point it.
 
-> ℹ️ **Provider ID `opencode` is safe**, even though Hermes ships a built-in OpenCode Zen provider. `opencode` is only an *alias* of the canonical `opencode-zen`, and Hermes' resolver deliberately lets a user-declared `providers.<name>` entry win over an alias — so requests go to `127.0.0.1:18282`, not the cloud. Verify any ID you pick:
+> ℹ️ **Provider ID `opencode` is safe**, even though Hermes ships a built-in OpenCode Zen provider. `opencode` is only an *alias* of the canonical `opencode-zen`, and Hermes' resolver deliberately lets a user-declared `providers.<name>` entry win over an alias — so requests go to `127.0.0.1:18383`, not the cloud. Verify any ID you pick:
 > ```bash
 > ~/.hermes/hermes-agent/venv/bin/python -c "from hermes_cli import runtime_provider as r; print(r._get_named_custom_provider('opencode'))"
-> # -> dict with base_url http://127.0.0.1:18282/v1  ✅   (None = it fell through to a built-in)
+> # -> dict with base_url http://127.0.0.1:18383/v1  ✅   (None = it fell through to a built-in)
 > ```
 > Only a *canonical* built-in name (e.g. `openrouter`, `nous`) gets shadowed. `opencode-bridge` is unambiguous if you'd rather not think about it.
 
@@ -114,11 +114,11 @@ Saving through the UI produces this in `~/.hermes/config.yaml` (back it up first
 model:
   default: opencode/mimo-v2.5-free
   provider: opencode                        # must match the providers key below
-  base_url: http://127.0.0.1:18282/v1
+  base_url: http://127.0.0.1:18383/v1
 providers:
   opencode:
     name: OpenCode (free)
-    base_url: http://127.0.0.1:18282/v1
+    base_url: http://127.0.0.1:18383/v1
     model: opencode/mimo-v2.5-free
     discover_models: true
     models:                                 # this map is what fills the picker
@@ -141,7 +141,7 @@ hermes gateway restart && hermes gateway status
 Verify the whole path Hermes → bridge → `opencode`:
 
 ```bash
-curl -s http://127.0.0.1:18282/v1/models | python3 -c "import sys,json;print([m['id'] for m in json.load(sys.stdin)['data']])"
+curl -s http://127.0.0.1:18383/v1/models | python3 -c "import sys,json;print([m['id'] for m in json.load(sys.stdin)['data']])"
 hermes -z "Reply with exactly: end-to-end ok"     # -> end-to-end ok
 tail -f ~/.opencode-bridge.log                    # watch Hermes hit the bridge live
 ```
@@ -161,7 +161,7 @@ Hermes ──HTTP(OpenAI chat-completions)──▶ opencode_bridge.py ──▶
 * OpenCode's JSON events become SSE deltas. Text parts are de-duplicated by part id, so a re-emitted (growing) part only sends its new suffix.
 * `usage` is real: per-step `tokens` and `cost` from every `step_finish` event are summed across the whole agentic run (`input + cache.read + cache.write` → `prompt_tokens`, `output + reasoning` → `completion_tokens`).
 * **Free-only by default.** The catalogue is discovered from `opencode models --verbose` and filtered to `cost.input == cost.output == 0`, so a typo in the model box can't quietly start billing a paid provider. It returns a `400` listing what *is* available.
-* Tools run with `--auto` (permissions never block a headless run) inside `--cwd`. Each run's persisted session is deleted afterwards, so `opencode session list` doesn't grow without bound.
+* Tools run with the CLI's auto-approve flag (`--dangerously-skip-permissions`, probed at startup so older CLIs' `--auto` still works; permissions never block a headless run) inside `--cwd`. Each run's persisted session is deleted afterwards, so `opencode session list` doesn't grow without bound.
 
 ---
 
@@ -187,7 +187,7 @@ Set these in the environment or in a `.env` next to `run-bridge.sh` (they're bak
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BRIDGE_HOST` | `127.0.0.1` | Bind address (keep it loopback) |
-| `BRIDGE_PORT` | `18282` | Listen port (the Claude bridge uses `18181`) |
+| `BRIDGE_PORT` | `18383` | Listen port (the Claude bridge uses `18181`) |
 | `OPENCODE_BRIDGE_MODEL` | `opencode/mimo-v2.5-free` | Default model |
 | `OPENCODE_BRIDGE_MODELS` | *(auto-discovered)* | Comma-separated override for the advertised catalogue |
 | `OPENCODE_BRIDGE_CWD` | `$HOME` | Working directory OpenCode's tools operate in |

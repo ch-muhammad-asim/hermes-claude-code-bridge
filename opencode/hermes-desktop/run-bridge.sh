@@ -7,7 +7,7 @@
 # an OpenAI-compatible endpoint the Hermes desktop app can use as a custom endpoint.
 #
 # Usage:
-#   ./run-bridge.sh                 # run in the foreground (default 127.0.0.1:18282)
+#   ./run-bridge.sh                 # run in the foreground (default 127.0.0.1:18383)
 #   ./run-bridge.sh test            # curl /health + a chat completion
 #   ./run-bridge.sh stream          # curl a streaming completion (SSE)
 #   ./run-bridge.sh image FILE.png  # E2E vision test: send an image via base64
@@ -25,7 +25,7 @@
 # and starts at login/boot (Linux uses lingering so it survives logout).
 #
 # Config (env or a .env next to this script) — baked into the service at install:
-#   BRIDGE_HOST  default 127.0.0.1     BRIDGE_PORT default 18282
+#   BRIDGE_HOST  default 127.0.0.1     BRIDGE_PORT default 18383
 #   OPENCODE_BRIDGE_MODEL         default opencode/mimo-v2.5-free
 #   OPENCODE_BRIDGE_CWD           default $HOME  (where opencode's tools operate)
 #   OPENCODE_BRIDGE_API_KEY       (empty -> unauthenticated)
@@ -41,7 +41,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 [ -f "$SCRIPT_DIR/.env" ] && { set -a; . "$SCRIPT_DIR/.env"; set +a; }
 
 BRIDGE_HOST="${BRIDGE_HOST:-127.0.0.1}"
-BRIDGE_PORT="${BRIDGE_PORT:-18282}"
+BRIDGE_PORT="${BRIDGE_PORT:-18383}"
 MODEL="${OPENCODE_BRIDGE_MODEL:-opencode/mimo-v2.5-free}"
 API_KEY="${OPENCODE_BRIDGE_API_KEY:-}"
 BRIDGE_CWD="${OPENCODE_BRIDGE_CWD:-$HOME}"

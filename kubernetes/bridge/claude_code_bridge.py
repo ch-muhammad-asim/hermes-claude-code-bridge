@@ -271,9 +271,15 @@ def _convo_key(messages: list[dict[str, Any]]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def _safe_error_text(text: str) -> str:
-    """Keep CLI errors useful while reducing accidental token leakage."""
-    redacted = text.strip()
+def _safe_error_text(text: object) -> str:
+    """Keep CLI errors useful while reducing accidental token leakage.
+
+    Accepts any object: the CLI reports `api_error_status` as an integer HTTP
+    status, so this is not always a str. Coercing here keeps a non-string from
+    turning a clean 502 into an unhandled AttributeError (which the client sees
+    as an empty reply rather than an error it can act on).
+    """
+    redacted = str(text).strip()
     for marker in ("sk-ant-", "Bearer ", "Authorization:", "api_key", "apiKey"):
         if marker in redacted:
             redacted = redacted.replace(marker, f"{marker[:3]}[redacted]")

@@ -109,9 +109,9 @@ cmd_run() {
 
 cmd_test() {
   local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
-  echo "[bridge] GET /health"; curl -fsS "${auth[@]}" "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
+  echo "[bridge] GET /health"; curl -fsS ${auth[@]+"${auth[@]}"} "http://127.0.0.1:${BRIDGE_PORT}/health"; echo
   echo "[bridge] POST /v1/chat/completions"
-  curl -sS --fail-with-body "${auth[@]}" -H 'content-type: application/json' \
+  curl -sS --fail-with-body ${auth[@]+"${auth[@]}"} -H 'content-type: application/json' \
     "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions" \
     -d "{\"model\":\"${MODEL}\",\"messages\":[{\"role\":\"user\",\"content\":\"Reply with exactly: claude code bridge ok\"}],\"stream\":false}"; echo
 }
@@ -125,7 +125,7 @@ cmd_image() {
   [ -f "$img" ] || { echo "[bridge] error: file not found: $img" >&2; exit 2; }
   local -a auth=(); if [ -n "$API_KEY" ]; then auth=(-H "Authorization: Bearer $API_KEY"); fi
   echo "[bridge] POST /v1/chat/completions (vision, model=${MODEL}, image=$(basename -- "$img"))"
-  "$PY" - "$img" <<PYEOF | curl -sS --fail-with-body "${auth[@]}" \
+  "$PY" - "$img" <<PYEOF | curl -sS --fail-with-body ${auth[@]+"${auth[@]}"} \
       -H 'content-type: application/json' -d @- \
       "http://127.0.0.1:${BRIDGE_PORT}/v1/chat/completions"; echo
 import base64, json, mimetypes, sys

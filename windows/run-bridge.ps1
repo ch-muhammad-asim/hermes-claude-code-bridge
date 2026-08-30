@@ -109,7 +109,13 @@ switch ($Command) {
     $argLine = (Bridge-Args | ForEach-Object { Quote-Argument $_ }) -join ' '
     $exe = "powershell.exe"
     $innerCommand = '& ' + (Quote-Argument $Py) + ' ' + $argLine + ' *>> ' + (Quote-Argument $LogFile)
-    $arguments = '-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -Command ' + (Quote-Argument $innerCommand)
+    # -EncodedCommand, not -Command: powershell.exe's NATIVE argument parser treats
+    # only double quotes as quoting, so a single-quoted -Command payload arrives as
+    # one string LITERAL — PowerShell echoes it and exits 0, the bridge never starts,
+    # and the task's on-failure restarts never fire. Base64 (UTF-16LE) survives Task
+    # Scheduler's command line untouched and is parsed by PowerShell itself.
+    $encoded   = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($innerCommand))
+    $arguments = '-WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
     $action   = New-ScheduledTaskAction -Execute $exe -Argument $arguments -WorkingDirectory $ScriptDir
     $trigger  = New-ScheduledTaskTrigger -AtLogOn
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

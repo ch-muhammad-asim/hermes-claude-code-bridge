@@ -274,8 +274,11 @@ def split_messages(messages: list[dict[str, Any]]) -> tuple[str, str]:
     return "\n\n".join(convo).strip(), "\n\n".join(system_parts).strip()
 
 
-def _safe_error_text(text: str) -> str:
-    redacted = (text or "").strip()
+def _safe_error_text(text: object) -> str:
+    # Accepts any object: the CLI can report error fields as non-strings (e.g. an
+    # integer HTTP status), and coercing here keeps that from turning a clean 502
+    # into an unhandled AttributeError (an empty reply from the client's view).
+    redacted = str(text or "").strip()
     for marker in _REDACT_MARKERS:
         if marker in redacted:
             redacted = redacted.replace(marker, f"{marker[:3]}[redacted]")
@@ -407,6 +410,30 @@ def run_streaming(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: s
     deadline = time.time() + cfg.timeout_seconds
     usage: dict[str, Any] = {}
     cost: Optional[float] = None
+    # Drain stderr CONTINUOUSLY: reading it only after exit deadlocks whenever
+    # claude writes more than the OS pipe buffer (~64 KiB) holds.
+    stderr_chunks: list[str] = []
+
+    def _drain_stderr() -> None:
+        try:
+            assert proc.stderr is not None
+            for raw in iter(proc.stderr.readline, ""):
+                stderr_chunks.append(raw)
+        except (OSError, ValueError):
+            pass
+
+    def _watchdog() -> None:
+        # The loop below only checks the deadline when a line ARRIVES, so a claude
+        # that wedges silently (no stdout) would hang the request forever and leak
+        # its concurrency slot until max_concurrency hung runs turn every request
+        # into 429. Killing the process EOFs the pipe and unblocks the read.
+        while time.time() < deadline and proc.poll() is None:
+            time.sleep(0.5)
+        if proc.poll() is None:
+            _kill(proc)
+
+    threading.Thread(target=_drain_stderr, daemon=True).start()
+    threading.Thread(target=_watchdog, daemon=True).start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -430,9 +457,18 @@ def run_streaming(cfg: "BridgeConfig", model: str, prompt: str, system_prompt: s
                 cost = event.get("total_cost_usd")
                 if event.get("is_error"):
                     raise ClaudeError(_safe_error_text(str(event.get("result", "claude error"))), 502)
-        rc = proc.wait(timeout=10)
+        try:
+            rc = proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            _kill(proc)  # outlived its exit grace: SIGTERM/KILL the tree, then reap
+            rc = proc.wait(timeout=10)
         if rc != 0:
-            err = (proc.stderr.read() if proc.stderr else "") or ""
+            # The watchdog kills a wedged run once the deadline passes; the child
+            # then dies by signal (rc < 0) with an empty stderr. Report that as the
+            # 504 it is, not a generic 502 "claude command failed".
+            if time.time() > deadline:
+                raise ClaudeError("claude command timed out", exit_code=504)
+            err = "".join(stderr_chunks).strip()
             raise ClaudeError(_safe_error_text(err or "claude command failed"), rc)
     finally:
         if proc.poll() is None:

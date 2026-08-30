@@ -15,7 +15,7 @@
 #   ./install-opencode-bridge.sh              # full install + start the service
 #   ./install-opencode-bridge.sh --no-service # install deps only, don't register the service
 #
-# Endpoint after install: http://127.0.0.1:18282/v1  (model: opencode/mimo-v2.5-free)
+# Endpoint after install: http://127.0.0.1:18383/v1  (model: opencode/mimo-v2.5-free)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,7 +26,9 @@ NO_SERVICE=0
 [ "${1:-}" = "--no-service" ] && NO_SERVICE=1
 
 BRIDGE_HOST="${BRIDGE_HOST:-127.0.0.1}"
-BRIDGE_PORT="${BRIDGE_PORT:-18282}"
+# Must match run-bridge.sh's default — install-service inherits that script's value,
+# so a mismatch here would print an endpoint the service isn't actually listening on.
+BRIDGE_PORT="${BRIDGE_PORT:-18383}"
 MODEL="${OPENCODE_BRIDGE_MODEL:-opencode/mimo-v2.5-free}"
 
 info() { printf '\033[36m[install]\033[0m %s\n' "$*"; }

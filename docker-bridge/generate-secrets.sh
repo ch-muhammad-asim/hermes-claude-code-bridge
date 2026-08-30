@@ -180,7 +180,10 @@ fi
 host_dir="$(sed -n 's/^HOST_CLAUDE_DIR=//p' "$ENV_FILE" | tail -1)"
 [ -n "$host_dir" ] || host_dir="$HOME/.claude"
 if [ "$NO_HOST_TOKEN" -eq 0 ] && command -v security >/dev/null 2>&1; then
-  fresh="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)"
+  # `|| true`: a host with no "Claude Code-credentials" keychain item makes
+  # `security` exit 44, and under set -e an unguarded substitution assignment
+  # kills the whole script silently. Empty $fresh is handled just below.
+  fresh="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)"
   if printf '%s' "$fresh" | python3 -c '
 import sys, json, time
 try:

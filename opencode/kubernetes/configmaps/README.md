@@ -42,4 +42,4 @@ A mounted ConfigMap file (`opencode.json`) does eventually refresh in-place, but
           r=subprocess.run([sh,'-n',str(p)],capture_output=True,text=True)
           print(name, 'OK' if r.returncode==0 else 'FAIL '+r.stderr)"
   ```
-- **Widening the permission policy** in `configmap-opencode-config.yaml` is the one edit with security consequences. Read the verified-semantics notes in that file first — in particular that `ask` + the bridge's `--auto` flag equals `allow`, and that a `bash` pattern map with a catch-all `deny` removes the tool entirely instead of narrowing it.
+- **Widening the permission policy** in `configmap-opencode-config.yaml` is the one edit with security consequences. Read the verified-semantics notes in that file first — in particular that `ask` + the bridge's auto-approve flag (`--dangerously-skip-permissions`) equals `allow`, and that a `bash` pattern map with a catch-all `deny` removes the tool entirely instead of narrowing it.

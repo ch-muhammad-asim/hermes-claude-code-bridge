@@ -15,7 +15,8 @@ data:
   #   * "deny" does not merely refuse a call — the tool is REMOVED from the model's
   #     tool list, so a denied capability cannot be attempted at all. Confirmed: with
   #     edit/write/patch denied the model reports "I don't have a write tool".
-  #   * "ask" + the bridge's --auto flag == ALLOW. --auto auto-approves anything not
+  #   * "ask" + the bridge's auto-approve flag (--dangerously-skip-permissions; probed
+  #     per CLI version) == ALLOW. It auto-approves anything not
   #     explicitly denied, so never leave a capability on the implicit "ask" default
   #     and expect it to be a guardrail. Every permission below is therefore explicit.
   #   * A per-pattern map whose catch-all is "deny" (e.g. bash: {"kubectl get *":

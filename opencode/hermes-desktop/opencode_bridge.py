@@ -501,8 +501,8 @@ def classify_error(message: str) -> int:
 
 def build_command(cfg: "BridgeConfig", model: str, image_files: Optional[list[str]] = None) -> list[str]:
     cmd = [cfg.opencode_bin, "run", "--format", "json", "--model", model]
-    if cfg.auto_approve:
-        cmd.append("--auto")
+    if cfg.auto_approve_flag:
+        cmd.append(cfg.auto_approve_flag)
     if cfg.show_reasoning:
         cmd.append("--thinking")
     if cfg.agent:
@@ -665,6 +665,11 @@ def run_events(cfg: "BridgeConfig", model: str, prompt: str,
         if error is not None:
             raise error
         if rc != 0:
+            # The watchdog kills a wedged run once the deadline passes; the child then
+            # dies by signal (rc < 0) with an empty stderr. Report that as the 504 it
+            # is, not a generic 502 "exited with code -15".
+            if time.time() > deadline:
+                raise OpenCodeError("opencode command timed out", exit_code=504)
             err = "".join(stderr_chunks).strip()
             message = _safe_error_text(err or f"opencode exited with code {rc}")
             raise OpenCodeError(message, classify_error(message))
@@ -703,6 +708,12 @@ class BridgeConfig:
         self.agent = args.agent
         self.variant = args.variant
         self.auto_approve = args.auto_approve
+        # The auto-approve flag was renamed across OpenCode releases (`--auto` →
+        # `--dangerously-skip-permissions`), and yargs rejects the WHOLE command on an
+        # unknown flag — Hermes then shows the CLI usage text instead of a reply. main()
+        # re-resolves this against `opencode run --help`; the modern spelling is the
+        # offline default so selfcheck needs no opencode binary.
+        self.auto_approve_flag = "--dangerously-skip-permissions" if args.auto_approve else ""
         self.show_tools = args.show_tools
         self.show_reasoning = args.show_reasoning
         self.pure = args.pure
@@ -1083,6 +1094,26 @@ class BridgeServer(ThreadingHTTPServer):
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
+def _detect_auto_approve_flag(opencode_bin: str) -> Optional[str]:
+    """Return the auto-approve flag this opencode actually understands.
+
+    Probes ``opencode run --help`` once at startup: newer CLIs spell it
+    ``--dangerously-skip-permissions``, older ones ``--auto``. Returns None when the
+    help lists neither (the flag is then omitted — a permission prompt may stall a
+    headless run, but every request breaking on an unknown flag is strictly worse).
+    """
+    try:
+        proc = subprocess.run([opencode_bin, "run", "--help"],
+                              capture_output=True, text=True, timeout=15)
+        text = (proc.stdout or "") + (proc.stderr or "")
+    except Exception:  # noqa: BLE001 — best-effort probe; fall back to the modern spelling
+        return "--dangerously-skip-permissions"
+    for flag in ("--dangerously-skip-permissions", "--auto"):
+        if flag in text:
+            return flag
+    return None
+
+
 def _detect_opencode_version(opencode_bin: str) -> str:
     try:
         out = subprocess.run([opencode_bin, "--version"], capture_output=True, text=True, timeout=15)
@@ -1095,7 +1126,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="OpenAI-compatible bridge to the OpenCode CLI (Hermes custom endpoint; free models by default).")
     p.add_argument("--host", default=os.getenv("BRIDGE_HOST", "127.0.0.1"))
-    p.add_argument("--port", type=int, default=int(os.getenv("BRIDGE_PORT", "18282")))
+    p.add_argument("--port", type=int, default=int(os.getenv("BRIDGE_PORT", "18383")))
     p.add_argument("--opencode-bin", default=os.getenv("OPENCODE_BIN", DEFAULT_OPENCODE_BIN))
     p.add_argument("--cwd", default=os.getenv("OPENCODE_BRIDGE_CWD", os.getcwd()),
                    help="directory opencode runs in (its tools read/write here)")
@@ -1123,7 +1154,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--variant", default=os.getenv("OPENCODE_BRIDGE_VARIANT", ""),
                    help="provider reasoning variant (e.g. high, max, minimal)")
     p.add_argument("--auto-approve", dest="auto_approve", action="store_true", default=True,
-                   help="pass --auto so tool permissions never block a headless run (default)")
+                   help="pass the CLI's auto-approve flag (--dangerously-skip-permissions, or "
+                        "--auto on older CLIs) so tool permissions never block a headless run (default)")
     p.add_argument("--no-auto-approve", dest="auto_approve", action="store_false")
     p.add_argument("--show-tools", dest="show_tools", action="store_true",
                    default=os.getenv("OPENCODE_BRIDGE_SHOW_TOOLS", "") not in ("", "0", "false"),
@@ -1168,6 +1200,13 @@ def main(argv: Optional[list[str]] = None) -> None:
 
     cfg = BridgeConfig(args)
     opencode_version = _detect_opencode_version(args.opencode_bin)
+    if cfg.auto_approve:
+        flag = _detect_auto_approve_flag(args.opencode_bin)
+        cfg.auto_approve_flag = flag or ""
+        if not flag:
+            print("[opencode-bridge] warning: this opencode advertises no auto-approve flag "
+                  "(`run --help` lists neither --dangerously-skip-permissions nor --auto) — "
+                  "tool permission prompts may stall headless runs", flush=True)
     cfg.refresh_catalogue()
     cfg.start_refresh_loop()
     if not cfg.default_in_catalogue:
@@ -1252,10 +1291,14 @@ def _selfcheck() -> None:
 
     cmd = build_command(BridgeConfig(build_parser().parse_args(
         ["--show-reasoning", "--agent", "build", "--variant", "high", "--cwd", os.getcwd()])), "opencode/x-free")
-    for expected in ("run", "--format", "json", "--model", "opencode/x-free", "--auto",
+    for expected in ("run", "--format", "json", "--model", "opencode/x-free",
+                     "--dangerously-skip-permissions",
                      "--thinking", "--agent", "build", "--variant", "high", "--dir"):
         assert expected in cmd, (expected, cmd)
     assert "-p" not in cmd and "--prompt" not in cmd, cmd  # prompt goes over stdin
+    # --no-auto-approve must drop the flag entirely (either spelling).
+    no_auto = build_command(BridgeConfig(build_parser().parse_args(["--no-auto-approve"])), "opencode/x-free")
+    assert "--dangerously-skip-permissions" not in no_auto and "--auto" not in no_auto, no_auto
 
     # Model cache round-trip: what discovery produces must survive a write/read cycle
     # with context lengths and the free flag intact, since the deployment builds the
