@@ -1,47 +1,64 @@
-# 🌉 Vertex Claude Bridge Commands
+# 🌉 Vertex Gemini Bridge Commands
 
-This folder contains the standalone Python bridge that lets Hermes call Claude Opus 4.8 through the Vertex AI Anthropic partner-model endpoint.
-
-Runtime path:
+This folder contains the production bridge used by the Vertex AI deployment. The configured runtime path is **Gemini 3.5 Flash only**:
 
 ```text
-Hermes -> vertex_claude_bridge.py -> Vertex AI Anthropic endpoint -> claude-opus-4-8
+Hermes
+  -> vertex_gemini_bridge.py
+  -> Vertex AI OpenAI-compatible chat-completions endpoint
+  -> gemini-3.5-flash
 ```
 
-The bridge does not use Claude Code, `claude -p`, or a Claude subscription.
+The bridge does not use Claude Code, `claude -p`, or a Claude subscription. It also does not translate tool schemas: Vertex AI already exposes an OpenAI-compatible chat-completions surface for Gemini, so the bridge is intentionally thin.
+
+> `vertex_claude_bridge.py` is retained in Git as a legacy/alternate implementation for the Anthropic partner-model path. It is **not** packaged into the production ConfigMap, is not selected by the StatefulSet, and is not a configured fallback model.
+
+## What the Gemini bridge does
+
+`vertex_gemini_bridge.py`:
+
+- exposes `GET /health`, `GET /v1/models`, and `POST /v1/chat/completions`;
+- authenticates to Google with ADC / GKE Workload Identity;
+- authenticates Hermes to the local bridge with `VERTEX_GEMINI_BRIDGE_API_KEY`;
+- qualifies the configured model as `google/gemini-3.5-flash` for Vertex and normalizes the response model back to `gemini-3.5-flash` for Hermes;
+- forwards tool definitions, tool calls, tool results, and SSE streaming without schema translation;
+- retries transient `429/500/502/503/504` and connection failures with bounded exponential backoff;
+- logs prompt, output, reasoning, and total token usage;
+- rejects oversized prompts using `VERTEX_GEMINI_MAX_PROMPT_CHARS`.
 
 ## 🔑 1. Required IAM
 
-`roles/aiplatform.user` is the only role the bridge needs, granted to whichever identity runs it:
+`roles/aiplatform.user` is the only Vertex role the bridge needs, granted to whichever identity runs it:
 
-- **In-cluster (production):** the pod authenticates via **GKE Workload Identity** — the `hermes-agent`
-  KSA is bound to the `hermes-vertex` Google service account carrying `roles/aiplatform.user`. One-time
-  setup commands: [`../README.md`](../README.md) → **Workload Identity (Vertex AI)**.
-- **Local development:** grant your own user the same role so local ADC works:
+- **In-cluster (production):** the pod authenticates via **GKE Workload Identity**. The `hermes-agent` KSA is bound to the production GSA; see [`../README.md`](../README.md) → **Workload Identity (Vertex AI)**.
+- **Local development:** grant your own Google identity the same role so Application Default Credentials can invoke Vertex AI.
+
+Example local grant:
 
 ```bash
-gcloud projects add-iam-policy-binding your-gcp-project-id \
-  --member="user:you@your-domain.com" \
+export PROJECT_ID="your-gcp-project-id"
+export USER_EMAIL="you@your-domain.com"
+
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="user:${USER_EMAIL}" \
   --role="roles/aiplatform.user"
 ```
 
-If you are using Agent Studio / Agent Platform features separately, `Vertex AI Agent Platform User` may also be useful, but this bridge primarily needs `roles/aiplatform.user`.
-
-## 🔌 2. Enable / Confirm APIs
+## 🔌 2. Enable the Vertex AI API
 
 ```bash
-gcloud services enable aiplatform.googleapis.com \
-  --project your-gcp-project-id
+export PROJECT_ID="your-gcp-project-id"
 
+gcloud services enable aiplatform.googleapis.com --project "$PROJECT_ID"
 gcloud services list \
   --enabled \
-  --project your-gcp-project-id \
+  --project "$PROJECT_ID" \
   --filter="config.name:aiplatform.googleapis.com"
 ```
 
-Also confirm `claude-opus-4-8` is enabled or accepted in Vertex AI Model Garden for `your-gcp-project-id`.
+The production model is `gemini-3.5-flash` and the configured Vertex location is `global`.
 
-## 🛠️ 3. Local Setup
+## 🛠️ 3. Local setup
 
 ```bash
 cd vertex-ai/kubernetes/bridge
@@ -51,57 +68,67 @@ python3 -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 🔐 4. Local Google Auth
+## 🔐 4. Local Google authentication
 
 ```bash
 gcloud auth application-default login
-gcloud config set project your-gcp-project-id
-gcloud auth application-default set-quota-project your-gcp-project-id
+gcloud config set project "$PROJECT_ID"
+gcloud auth application-default set-quota-project "$PROJECT_ID"
 ```
 
-Verify ADC can be resolved:
+Verify ADC:
 
 ```bash
 python3 - <<'PY'
 import google.auth
 creds, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-print(project)
-print(type(creds).__name__)
+print("project:", project)
+print("credentials:", type(creds).__name__)
 PY
 ```
 
-## ▶️ 5. Run Locally
+## ▶️ 5. Run the Gemini bridge locally
 
 ```bash
-export ANTHROPIC_VERTEX_PROJECT_ID="your-gcp-project-id"
+export VERTEX_GEMINI_PROJECT_ID="$PROJECT_ID"
 export CLOUD_ML_REGION="global"
-export ANTHROPIC_MODEL="claude-opus-4-8"
-export VERTEX_CLAUDE_BRIDGE_API_KEY="$(openssl rand -hex 32)"
-export VERTEX_CLAUDE_MAX_TOKENS="8192"
-export VERTEX_CLAUDE_TIMEOUT_SECONDS="300"
-export VERTEX_CLAUDE_PROMPT_CACHING="1"
-export VERTEX_CLAUDE_MAX_RETRIES="2"
+export GEMINI_MODEL="gemini-3.5-flash"
+export VERTEX_GEMINI_BRIDGE_API_KEY="$(openssl rand -hex 32)"
+export VERTEX_GEMINI_MAX_TOKENS="8192"
+export VERTEX_GEMINI_TIMEOUT_SECONDS="300"
+export VERTEX_GEMINI_MAX_RETRIES="2"
+export VERTEX_GEMINI_MAX_PROMPT_CHARS="200000"
 
-python3 vertex_claude_bridge.py \
+python3 vertex_gemini_bridge.py \
   --host 0.0.0.0 \
   --port 18182
 ```
 
-## 🧪 6. Local Validation
+In GKE, `VERTEX_GEMINI_PROJECT_ID` is intentionally omitted so `google.auth.default()` resolves the project from Workload Identity. Set it only when you deliberately need a different billing/project target.
+
+## 🧪 6. Local validation
 
 Health:
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" \
   http://127.0.0.1:18182/health
+```
+
+Expected model metadata includes:
+
+```text
+provider: vertex-gemini
+location: global
+model: gemini-3.5-flash
 ```
 
 Models:
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" \
   http://127.0.0.1:18182/v1/models
 ```
 
@@ -109,15 +136,15 @@ Chat completion:
 
 ```bash
 curl -sS \
-  -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" \
   -H "Content-Type: application/json" \
   http://127.0.0.1:18182/v1/chat/completions \
   -d '{
-    "model": "claude-opus-4-8",
+    "model": "gemini-3.5-flash",
     "messages": [
       {
         "role": "user",
-        "content": "Reply with exactly: vertex claude ok"
+        "content": "Reply with exactly: vertex gemini ok"
       }
     ],
     "stream": false,
@@ -129,11 +156,11 @@ Streaming validation:
 
 ```bash
 curl -N -sS \
-  -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" \
   -H "Content-Type: application/json" \
   http://127.0.0.1:18182/v1/chat/completions \
   -d '{
-    "model": "claude-opus-4-8",
+    "model": "gemini-3.5-flash",
     "messages": [
       {
         "role": "user",
@@ -145,50 +172,35 @@ curl -N -sS \
   }'
 ```
 
-## 🤫 7. Kubernetes Secret
+## 🤫 7. Kubernetes secret
 
-Do not print secret values. Create or update the dedicated Vertex bridge key:
+Create or rotate the bridge key without printing it:
 
 ```bash
 export KUBECONFIG=$HOME/.kube/clusters/prod
 export NAMESPACE=devops-agent
-export VERTEX_CLAUDE_BRIDGE_API_KEY="$(openssl rand -hex 32)"
+export VERTEX_GEMINI_BRIDGE_API_KEY="$(openssl rand -hex 32)"
 
 kubectl -n "$NAMESPACE" create secret generic hermes-agent-secrets \
-  --from-literal=VERTEX_CLAUDE_BRIDGE_API_KEY="$VERTEX_CLAUDE_BRIDGE_API_KEY" \
+  --from-literal=VERTEX_GEMINI_BRIDGE_API_KEY="$VERTEX_GEMINI_BRIDGE_API_KEY" \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-If `hermes-agent-secrets` already exists and you only need to add the Vertex key without changing other keys:
+If `hermes-agent-secrets` also contains dashboard/API values, use the full secret creation flow in [`../README.md`](../README.md) rather than replacing unrelated keys accidentally.
 
-```bash
-kubectl -n "$NAMESPACE" patch secret hermes-agent-secrets \
-  --type='json' \
-  -p="[{\"op\":\"add\",\"path\":\"/data/VERTEX_CLAUDE_BRIDGE_API_KEY\",\"value\":\"$(printf %s "$VERTEX_CLAUDE_BRIDGE_API_KEY" | base64 | tr -d '\n')\"}]"
-```
-
-Verify key names only:
-
-```bash
-kubectl -n "$NAMESPACE" get secret hermes-agent-secrets -o json | jq -r '.data | keys[]' | sort
-```
-
-## 🚀 8. Apply Kubernetes Manifests
-
-The manifest set is self-contained — a plain Kustomize apply from the deploy root:
+## 🚀 8. Deploy
 
 ```bash
 cd vertex-ai/kubernetes
-
 kubectl apply -k .
-
-kubectl -n devops-agent rollout restart statefulset/hermes-agent
 kubectl -n devops-agent rollout status statefulset/hermes-agent --timeout=10m
 ```
 
-## ✅ 9. Kubernetes Validation
+The production Kustomization packages `vertex_gemini_bridge.py` and `requirements.txt`. The legacy Claude bridge is not part of the runtime ConfigMap.
 
-Pod and containers:
+## ✅ 9. In-cluster validation
+
+Pod health:
 
 ```bash
 kubectl -n devops-agent get pod hermes-agent-0 -o wide
@@ -196,17 +208,23 @@ kubectl -n devops-agent get pod hermes-agent-0 \
   -o jsonpath='{.status.phase}{"\n"}{range .status.containerStatuses[*]}{.name}={.ready}{"\n"}{end}'
 ```
 
-Confirm the pod references the dedicated Vertex key:
-
-```bash
-kubectl -n devops-agent get pod hermes-agent-0 \
-  -o jsonpath='{range .spec.containers[*]}{.name}:{range .env[*]}{.name}={.valueFrom.secretKeyRef.key}{","}{end}{"\n"}{end}'
-```
-
 Bridge logs:
 
 ```bash
-kubectl -n devops-agent logs hermes-agent-0 -c vertex-claude-bridge --tail=50
+kubectl -n devops-agent logs hermes-agent-0 -c vertex-gemini-bridge --tail=50
+```
+
+Confirm the resolved runtime model:
+
+```bash
+kubectl -n devops-agent logs hermes-agent-0 -c vertex-gemini-bridge \
+  | grep 'listening on' | tail -1
+```
+
+Expected:
+
+```text
+location=global model=gemini-3.5-flash auth=on
 ```
 
 In-cluster health:
@@ -215,66 +233,41 @@ In-cluster health:
 kubectl -n devops-agent run vertex-bridge-curl \
   --rm -it --restart=Never \
   --image=curlimages/curl:8.16.0 \
-  --env="VERTEX_CLAUDE_BRIDGE_API_KEY=$VERTEX_CLAUDE_BRIDGE_API_KEY" \
-  -- sh -lc 'curl -sS -H "Authorization: Bearer $VERTEX_CLAUDE_BRIDGE_API_KEY" http://hermes-agent:18182/health'
+  --env="VERTEX_GEMINI_BRIDGE_API_KEY=$VERTEX_GEMINI_BRIDGE_API_KEY" \
+  -- sh -lc 'curl -sS -H "Authorization: Bearer $VERTEX_GEMINI_BRIDGE_API_KEY" http://hermes-agent:18182/health'
 ```
 
-Public dashboard health:
+## 🛟 10. Troubleshooting
 
-```bash
-curl -sS https://devops.saqlainmushtaq.com/health
-```
+### `401 unauthorized`
 
-## 💬 10. Slack Home Channel Cleanup
+The client and bridge do not share the same `VERTEX_GEMINI_BRIDGE_API_KEY`. Rotate the Kubernetes Secret, then roll the StatefulSet.
 
-The production home channel is `#devops` (`C0123456789`). Verify the runtime and PVC are aligned:
+### `auth=off` in bridge startup logs
 
-```bash
-kubectl -n devops-agent exec -i statefulset/hermes-agent -c hermes -- \
-  /opt/hermes/.venv/bin/python - <<'PY'
-from pathlib import Path
-import os, yaml
+Treat this as a deployment failure. The bridge accepts requests without authentication when the configured key is empty. Verify the Secret key exists and is non-empty, then restart the pod.
 
-config = yaml.safe_load(Path("/opt/data/config.yaml").read_text()) or {}
-home = (config.get("platforms", {}).get("slack", {}).get("home_channel") or {})
-env_lines = [
-    line for line in Path("/opt/data/.env").read_text().splitlines()
-    if line.startswith("SLACK_HOME_CHANNEL")
-]
-print("process_SLACK_HOME_CHANNEL=" + str(os.environ.get("SLACK_HOME_CHANNEL")))
-print("config_home_chat_id=" + str(home.get("chat_id")))
-print("config_home_name=" + str(home.get("name")))
-print("pvc_env=" + "|".join(env_lines))
-PY
-```
+### `404 model not found`
 
-Expected:
+Confirm:
 
 ```text
-process_SLACK_HOME_CHANNEL=C0123456789
-config_home_chat_id=C0123456789
-config_home_name=devops
+CLOUD_ML_REGION=global
+GEMINI_MODEL=gemini-3.5-flash
 ```
 
-## 🛟 11. Troubleshooting
+The deployment intentionally uses the global Vertex endpoint for Gemini 3.x.
 
-If the bridge starts but Vertex calls fail:
+### `403` from Vertex AI
 
-```bash
-kubectl -n devops-agent logs hermes-agent-0 -c vertex-claude-bridge --tail=100
-```
+Verify Workload Identity and that the effective GSA has `roles/aiplatform.user` for the target project.
 
-Common causes:
+### Long-running or failed model calls
 
-- `roles/aiplatform.user` missing for the calling identity.
-- `aiplatform.googleapis.com` disabled.
-- Claude Opus 4.8 not accepted/enabled in Model Garden.
-- ADC unavailable in the runtime environment.
-- `VERTEX_CLAUDE_BRIDGE_API_KEY` missing from `hermes-agent-secrets`.
+Check the sidecar logs for retryable `429/5xx` responses and token usage. The bridge retries only a bounded number of times; persistent provider errors are surfaced to Hermes instead of looping indefinitely.
 
-If Slack says no home channel is set, verify Section 10 and restart:
+## Legacy Claude bridge
 
-```bash
-kubectl -n devops-agent rollout restart statefulset/hermes-agent
-kubectl -n devops-agent rollout status statefulset/hermes-agent --timeout=10m
-```
+`vertex_claude_bridge.py` remains in this directory only as an alternate implementation/reference for Vertex AI Anthropic partner models. It has its own `VERTEX_CLAUDE_*` / `ANTHROPIC_*` configuration contract and is intentionally outside the production Kustomize runtime.
+
+Do not add a Claude provider or Claude model fallback to `config.yaml` unless the deployment architecture is deliberately changed and reviewed. The supported production configuration documented in `vertex-ai/` has one default model: **`gemini-3.5-flash`**.

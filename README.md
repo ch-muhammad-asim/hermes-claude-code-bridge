@@ -74,26 +74,26 @@ also advertises **`claude-fable-5`** as an optional pick.
 
 **Native cloud-provider models (no Claude Code CLI, no Claude subscription):**
 
-Hermes talks to a pod-local bridge sidecar that translates chat-completions into the
-cloud provider's own Anthropic Messages API, authenticating with keyless workload
-credentials. The bridge listens on **`http://127.0.0.1:18182/v1`** — pod-local, never
-public. One directory per cloud:
+Hermes talks to a pod-local OpenAI-compatible bridge on **`http://127.0.0.1:18182/v1`** — pod-local,
+never public — and authenticates to the cloud with workload identity. The bridge implementation is
+provider-specific: the Google path is a thin authenticated proxy to Vertex AI's OpenAI-compatible
+Gemini endpoint, while the AWS path translates chat-completions to Bedrock's Anthropic Messages shape.
 
 | | Cloud | Model | Identity | Ingress | Guide |
 |---|---|---|---|---|---|
-| ☁️ | **Google Cloud** — Vertex AI on GKE | `claude-opus-4-8`, or `gemini-3.5-flash` (deployed default) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
+| ☁️ | **Google Cloud** — Vertex AI on GKE | **Gemini 3.5 Flash** (`gemini-3.5-flash`) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
 | 🟧 | **AWS** — Bedrock on EKS, or k3s where EKS is SCP-blocked | **Claude Sonnet 4.5** (`us.anthropic.claude-sonnet-4-5`, inference-profile only) | EKS Pod Identity, or EC2 instance profile | Traefik `IngressRoute` | [`aws-bedrock/`](./aws-bedrock) |
 
-The AWS deployment is a port of the Google one — same Hermes runtime config, same
-hardening posture, same chat-completions ⇄ Anthropic Messages translation. It adds one
-capability the Google path does not have: **scoped Kubernetes write access, so the agent
-repairs a broken workload instead of only reporting it.** Read-only everywhere else,
-enforced by RBAC rather than by trusting the model.
+The AWS deployment follows the same Hermes runtime hardening posture as the Google deployment, but its
+model bridge performs chat-completions ⇄ Anthropic Messages translation. It adds one capability the
+Google path does not have: **scoped Kubernetes write access, so the agent repairs a broken workload
+instead of only reporting it.** Read-only everywhere else, enforced by RBAC rather than by trusting
+the model.
 
-Why either of these instead of the CLI path: native Kubernetes ServiceAccount RBAC,
-cloud-native IAM and billing, and no dependency on `claude -p`. The tradeoff is that you
-own the translation bridge — so prompt caching, retries and cost telemetry are
-implemented in it.
+Why either native path instead of the CLI path: native Kubernetes ServiceAccount RBAC, cloud-native IAM
+and billing, and no dependency on `claude -p`. On Vertex Gemini the bridge stays deliberately thin — ADC,
+auth gating, model normalization, retries, and usage telemetry — while the Bedrock path also owns the
+Anthropic schema translation.
 
 **Same protocol, different agent CLI:**
 

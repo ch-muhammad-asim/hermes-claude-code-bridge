@@ -32,7 +32,7 @@ kubernetes/
 Hermes Agent
   -> custom Hermes provider
   -> vertex-gemini-bridge
-  -> Google Vertex AI Anthropic partner model endpoint
+  -> Google Vertex AI OpenAI-compatible chat-completions endpoint
   -> gemini-3.5-flash
 ```
 
@@ -210,8 +210,8 @@ tools:
     enabled: false
 ```
 
-For the Vertex provider path, `tool_search` is disabled so Opus 4.8 receives explicit tool definitions
-from Hermes directly when tools are enabled.
+For the Vertex provider path, `tool_search` is disabled so Gemini 3.5 Flash receives explicit tool
+definitions from Hermes directly when tools are enabled.
 
 ## 📦 Manifest Files
 
