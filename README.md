@@ -134,6 +134,54 @@ The important separation is:
 
 So the `vertex-gemini-bridge` is **gateway-like**, but it is not the agent gateway: **Hermes is the agent runtime/orchestration layer; the bridge is the thin model/provider gateway between Hermes and Vertex AI.**
 
+### 🌉 Thin bridge vs AgentGateway
+
+The two designs solve the same **connectivity boundary** at very different scales. The current
+`vertex-gemini-bridge` is a purpose-built provider adapter for one Hermes deployment and one Vertex
+model path. [AgentGateway](https://agentgateway.dev/) is a general AI connectivity data plane for
+LLMs, MCP, A2A, and agent traffic. It can replace the thin model-connectivity layer as the platform
+grows, but it **does not replace Hermes** as the agent runtime.
+
+| Area | Current `vertex-gemini-bridge` | AgentGateway |
+|---|---|---|
+| **Primary role** | Thin model/provider gateway for Hermes → Vertex AI | Shared AI connectivity data plane for agents, LLMs, MCP, A2A, and APIs |
+| **Deployment shape** | Python sidecar in the same `hermes-agent` Pod | Standalone Kubernetes Deployment/Helm, or full Kubernetes control plane + managed proxy data plane |
+| **Kubernetes APIs** | Standard Pod/StatefulSet/Service configuration only | Gateway API plus AgentGateway CRDs such as `AgentgatewayBackend` and `AgentgatewayPolicy` in control-plane mode |
+| **Model scope** | One configured production path: `gemini-3.5-flash` on Vertex AI | Designed for routing to multiple cloud/local LLM backends and provider types |
+| **Cloud portability** | Current implementation is purpose-built for GKE + Vertex AI | GKE, EKS, and AKS are supported; standalone and control-plane modes work on all three |
+| **Cloud identity** | GKE Workload Identity / ADC | GKE Workload Identity, EKS IAM/Pod Identity, and AKS workload/managed identity |
+| **Auth & policy** | Bridge bearer key + GCP IAM + application-specific guardrails | Centralized authentication, authorization, rate limits, retries, traffic policy, TLS, and observability policies |
+| **MCP / A2A gatewaying** | No — Hermes connects to MCP separately | Native connectivity use cases include MCP and agent-to-agent traffic |
+| **Operational footprint** | Low: one small sidecar and one provider-specific config path | Medium/high: gateway lifecycle, routes/backends/policies, and optionally a Kubernetes control plane |
+| **Best fit** | One Hermes agent, one provider/model, simple ownership boundary | Multiple agents/teams/providers, shared policy, centralized routing, MCP/A2A, or platform-wide governance |
+
+For **this repository today**, the thin bridge is the simpler and more appropriate production design:
+
+```text
+Hermes SRE
+   ↓
+vertex-gemini-bridge
+   ↓
+GKE Workload Identity
+   ↓
+Vertex AI → Gemini 3.5 Flash
+```
+
+AgentGateway becomes worth the extra moving parts when the topology grows into something closer to:
+
+```text
+Hermes SRE ────────┐
+Other agents ──────┼──> AgentGateway ──> Vertex AI / Bedrock / Azure / local LLMs
+MCP clients ───────┤                 └──> MCP servers
+A2A agents ────────┘                 └──> A2A backends
+```
+
+That is the migration point: **keep the thin bridge while the requirement is one agent + one model;
+consider AgentGateway when connectivity and policy become a shared platform concern.** Official
+references: [Kubernetes architecture](https://agentgateway.dev/docs/kubernetes/latest/documentation/about/overview/),
+[cloud-provider support](https://agentgateway.dev/docs/standalone/latest/integrations/cloud-providers/), and
+[cloud workload identity](https://agentgateway.dev/docs/kubernetes/latest/documentation/security/backend-authn/providers/).
+
 | | Cloud | Model | Identity | Ingress | Guide |
 |---|---|---|---|---|---|
 | ☁️ | **Google Cloud** — Vertex AI on GKE | **Gemini 3.5 Flash** (`gemini-3.5-flash`) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
