@@ -79,6 +79,61 @@ never public — and authenticates to the cloud with workload identity. The brid
 provider-specific: the Google path is a thin authenticated proxy to Vertex AI's OpenAI-compatible
 Gemini endpoint, while the AWS path translates chat-completions to Bedrock's Anthropic Messages shape.
 
+### ☁️ Vertex AI + Hermes request flow
+
+```mermaid
+flowchart LR
+    U([User]) --> CH[Slack / Dashboard / API]
+
+    subgraph GKE["☸️ GKE · hermes-agent Pod"]
+        H["🧠 Hermes SRE<br/>Agent runtime / agent gateway"]
+        B["🌉 vertex-gemini-bridge<br/>Thin model / provider gateway"]
+        O["🔎 gcp-mcp-auth-bridge<br/>Observability auth proxy"]
+
+        CH --> H
+        H -->|"OpenAI-compatible chat completion<br/>Bearer-authenticated · 127.0.0.1:18182"| B
+        H -->|"Logging · Monitoring · Trace"| O
+    end
+
+    B -. "ADC" .-> WI["🔐 GKE Workload Identity"]
+    WI --> GSA["Google Service Account<br/>Vertex AI permissions"]
+    B -->|"Authenticated request"| V["☁️ Vertex AI<br/>OpenAI-compatible endpoint"]
+    V --> M["✨ Gemini 3.5 Flash<br/>gemini-3.5-flash"]
+    M -. "SSE / JSON response" .-> B
+    B -. "OpenAI-compatible response" .-> H
+    H -. "Reply" .-> CH
+    CH -.-> U
+
+    H --> K["☸️ Kubernetes API<br/>read-only RBAC"]
+    H --> GH["🐙 GitHub CLI<br/>read-only GitHub App"]
+    H --> PW["🎭 Playwright MCP<br/>headless browser"]
+    O --> OBS["📈 Cloud Logging · Monitoring · Trace"]
+
+    classDef user fill:#f6f8fa,stroke:#57606a,color:#24292f,stroke-width:1.5px;
+    classDef agent fill:#ddf4ff,stroke:#0969da,color:#0550ae,stroke-width:2px;
+    classDef bridge fill:#fff8c5,stroke:#bf8700,color:#7d4e00,stroke-width:2px;
+    classDef cloud fill:#dafbe1,stroke:#1a7f37,color:#116329,stroke-width:2px;
+    classDef tool fill:#fbefff,stroke:#8250df,color:#6639ba,stroke-width:1.5px;
+
+    class U,CH user;
+    class H agent;
+    class B,O bridge;
+    class WI,GSA,V,M,OBS cloud;
+    class K,GH,PW tool;
+```
+
+The important separation is:
+
+| Layer | Component | Responsibility |
+|---|---|---|
+| **Agent layer** | **Hermes SRE** | Sessions, skills, tool/MCP use, investigation flow, Slack/dashboard/API interaction |
+| **Model gateway layer** | **`vertex-gemini-bridge`** | OpenAI-compatible endpoint, bridge API-key auth, ADC, model normalization, retries, streaming, token telemetry |
+| **Identity layer** | **GKE Workload Identity** | Gives the bridge short-lived Google credentials without a service-account JSON key |
+| **Model serving layer** | **Vertex AI** | Hosts and serves the configured model endpoint |
+| **Model** | **Gemini 3.5 Flash** | Performs the actual inference |
+
+So the `vertex-gemini-bridge` is **gateway-like**, but it is not the agent gateway: **Hermes is the agent runtime/orchestration layer; the bridge is the thin model/provider gateway between Hermes and Vertex AI.**
+
 | | Cloud | Model | Identity | Ingress | Guide |
 |---|---|---|---|---|---|
 | ☁️ | **Google Cloud** — Vertex AI on GKE | **Gemini 3.5 Flash** (`gemini-3.5-flash`) | GKE Workload Identity → GSA | Traefik `IngressRoute` | [`vertex-ai/`](./vertex-ai) |
