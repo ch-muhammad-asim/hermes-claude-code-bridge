@@ -129,11 +129,15 @@ rbac:
 
 resources:
   limits:
-    cpu: "500m"
+    cpu: null
     memory: 512Mi
   requests:
     cpu: 100m
     memory: 128Mi
+
+env:
+  - name: GOMAXPROCS
+    value: "2"
 
 nodeSelector:
   cloud.google.com/gke-container-runtime: containerd
