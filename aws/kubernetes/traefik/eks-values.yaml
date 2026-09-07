@@ -116,7 +116,12 @@ resources:
     cpu: 100m
     memory: 128Mi
   limits:
-    memory: 256Mi
+    cpu: null
+    memory: 512Mi
+
+env:
+  - name: GOMAXPROCS
+    value: "2"
 
 podDisruptionBudget:
   enabled: true
