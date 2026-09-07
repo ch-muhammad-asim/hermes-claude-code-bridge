@@ -106,7 +106,12 @@ resources:
     cpu: 100m
     memory: 128Mi
   limits:
-    memory: 256Mi
+    cpu: null
+    memory: 512Mi
+
+env:
+  - name: GOMAXPROCS
+    value: "2"
 
 # Single replica on a single node: a PDB would only block eviction of the only pod.
 podDisruptionBudget:
