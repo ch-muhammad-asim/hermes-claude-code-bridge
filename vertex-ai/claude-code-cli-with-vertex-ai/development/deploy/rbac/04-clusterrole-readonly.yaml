@@ -1,0 +1,131 @@
+# Investigation role: includes exec/attach and ephemeral-container mutation.
+# Review these privileges before binding this role in your cluster.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hermes-cluster-readonly
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - namespaces
+      - pods
+      - pods/log
+      - pods/status
+      - events
+      - services
+      - endpoints
+      - persistentvolumes
+      - persistentvolumeclaims
+      - resourcequotas
+      - limitranges
+    verbs: ["get", "list", "watch"]
+
+  # Workload/controller inspection across namespaces.
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - deployments/status
+      - replicasets
+      - replicasets/status
+      - statefulsets
+      - statefulsets/status
+      - daemonsets
+      - daemonsets/status
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources:
+      - jobs
+      - jobs/status
+      - cronjobs
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources:
+      - horizontalpodautoscalers
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["pods/exec", "pods/attach"]
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["pods/ephemeralcontainers"]
+    verbs: ["get", "update", "patch"]
+
+  # Networking/ingress guardrails.
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - ingresses
+      - ingressclasses
+      - networkpolicies
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["traefik.io"]
+    resources:
+      - ingressroutes
+      - ingressroutetcps
+      - ingressrouteudps
+      - middlewares
+      - middlewaretcps
+      - tlsoptions
+      - tlsstores
+      - traefikservices
+      - serverstransports
+    verbs: ["get", "list", "watch"]
+
+  # Storage and node capacity context.
+  - apiGroups: ["storage.k8s.io"]
+    resources:
+      - storageclasses
+      - volumeattachments
+      - csidrivers
+      - csinodes
+    verbs: ["get", "list", "watch"]
+
+  # Metrics for SRE triage when metrics-server is installed.
+  - apiGroups: ["metrics.k8s.io"]
+    resources:
+      - pods
+      - nodes
+    verbs: ["get", "list"]
+
+  # RBAC guardrail inspection only. No write verbs, no escalation.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - rolebindings
+      - clusterroles
+      - clusterrolebindings
+    verbs: ["get", "list", "watch"]
+
+  # Common policy/admission objects used as guardrails.
+  - apiGroups: ["policy"]
+    resources:
+      - poddisruptionbudgets
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources:
+      - validatingwebhookconfigurations
+      - mutatingwebhookconfigurations
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: hermes-cluster-readonly
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+subjects:
+  - kind: ServiceAccount
+    name: hermes-agent
+    namespace: devops-agent
+roleRef:
+  kind: ClusterRole
+  name: hermes-cluster-readonly
+  apiGroup: rbac.authorization.k8s.io
