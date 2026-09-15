@@ -1,0 +1,31 @@
+{
+  "_comment": "Overrides deep-merged onto DEFAULT_POLICY in extensions/guardrails/policy.mjs. Arrays REPLACE the default list, so copy the default first if you only want to add. Keys starting with _ are ignored.",
+  "_mode": "ask = safe read-only calls run, risky ones prompt (Codex-style: once / session / deny). audit = run everything, log only. enforce = block risky calls.",
+  "mode": "ask",
+  "profile": "dangerous-only",
+  "allowed_tools": [
+    "read",
+    "bash",
+    "grep",
+    "find",
+    "ls"
+  ],
+  "terminate_on_block": false,
+  "max_tool_calls_per_run": 40,
+  "paths": {
+    "_allowed_roots": "Ubuntu set: same as macOS minus /private/tmp (a macOS-only path), plus /var/tmp and /srv.",
+    "allowed_roots": [
+      "~",
+      "/etc",
+      "/var/log",
+      "/var/tmp",
+      "/tmp",
+      "/opt",
+      "/srv"
+    ]
+  },
+  "bash": {
+    "max_command_length": 4000
+  },
+  "_profile": "dangerous-only = only destructive/irreversible/privileged/secret-exposing calls ask (default). read-only = anything that mutates asks."
+}

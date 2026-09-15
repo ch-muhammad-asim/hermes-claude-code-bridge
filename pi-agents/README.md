@@ -64,8 +64,11 @@ The folders are organised by **OS → model backend**; the shared pieces live on
 | ⌨️🤖 [`macos/claude-code/pi-cli/`](macos/claude-code/pi-cli) | macOS | Terminal-native `pi` on Claude Code: pi's own tools as **real function calls**, **all** claude.ai connectors, no guardrails | `—` / `18187` | ✅ verified |
 | ⌨️🆓 [`macos/pi-opencode-cli/`](macos/pi-opencode-cli) | macOS (Linux service included) | Terminal-native `pi` on OpenCode **free** models (pure-LLM bridge, tool calls emulated over text), guardrails opt-in | `—` / `18386` | ✅ verified |
 | 🧩 [`macos/common/`](macos/common) | | Shared: `pi_bridge.py`, provider + guardrails extensions, launcher & installer libraries | | |
+| 🐧🤖 [`ubuntu/claude-code/`](ubuntu/claude-code) | Ubuntu 20.04+ | Same Claude Code backend, as persistent `systemd --user` services (linger on → back after reboot) | `18485` / `18186` | ✅ verified end to end |
+| 🐧🆓 [`ubuntu/opencode/`](ubuntu/opencode) | Ubuntu 20.04+ | Same OpenCode backend, as persistent `systemd --user` services | `18484` / `18385` | ⚠️ services + endpoint verified; the `opencode` CLI itself returns empty replies for the free models ([details](ubuntu/README.md#known-issue-opencode-free-models-return-empty-replies)) |
+| 🧩 [`ubuntu/common/`](ubuntu/common) | | Ubuntu launcher (systemd) + apt installer; the OS-agnostic code is **symlinked** to `macos/common/` | | |
 | 🍎🧠 `macos/codex/` | macOS | OpenAI Codex CLI / GPT models behind pi | | 🚧 planned |
-| 🐧 `linux/…`, 🪟 `windows/…` | | | | 🗺️ later |
+| 🪟 `windows/…` | | | | 🗺️ later |
 
 ## 🚀 Start here
 
@@ -77,6 +80,23 @@ cd ~/hermes-claude-code-bridge/pi-agents/macos/opencode && ./install.sh
 
 ```bash
 cd ~/hermes-claude-code-bridge/pi-agents/macos/claude-code && ./install.sh
+```
+
+On Ubuntu, use the `ubuntu/` tree instead — same ports and same Hermes settings, but the services are `systemd --user`
+units with linger enabled, so the endpoints come back after a reboot:
+
+```bash
+cd ~/hermes-claude-code-bridge/pi-agents/ubuntu/claude-code && ./install.sh
+```
+
+All four HTTP servers bind to `127.0.0.1` only. Point Hermes at a **pi bridge** port (`:18485` / `:18484`); the upstream
+ports (`:18186` / `:18385`) are the model backends — calling those directly bypasses pi, its tools and the guardrails.
+Every server serves `/health`, `/metrics`, `/config`, `/v1/models`, `/v1/models/{id}` and `POST /v1/chat/completions`
+(plus `POST /v1/models/refresh`, except on `:18186`). Full route table, copy-paste URLs and smoke tests:
+[`ubuntu/README.md` → Endpoint reference](ubuntu/README.md#-endpoint-reference).
+
+```bash
+for p in 18485 18186 18484 18385; do printf '%s %s\n' "$p" "$(curl -fsS -m 5 http://127.0.0.1:$p/health || echo DOWN)"; done
 ```
 
 Both can run side by side; in Hermes each is its own custom endpoint (`:18484` and `:18485`) — switch with **Use**. Details,
