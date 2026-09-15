@@ -1,0 +1,70 @@
+###############################################################################
+# inflate - the standard Karpenter scale-up probe
+#
+# Pods request CPU but run the pause image, so they consume the scheduler's
+# attention and nothing else. Scale the replica count up and Karpenter has to
+# provision real nodes to place them; scale it back to zero and consolidation
+# should reclaim those nodes.
+#
+#   kubectl apply -f inflate.yaml
+#   kubectl scale deployment inflate --replicas 6
+#   kubectl scale deployment inflate --replicas 0
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inflate
+  namespace: default
+  labels:
+    app: inflate
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: inflate
+  template:
+    metadata:
+      labels:
+        app: inflate
+    spec:
+      # Karpenter honours this on consolidation: it will not evict a pod it
+      # cannot reschedule elsewhere without breaking the budget.
+      terminationGracePeriodSeconds: 0
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: inflate
+          image: registry.k8s.io/pause:3.10
+          resources:
+            requests:
+              cpu: 500m
+              memory: 128Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+      # Land on Karpenter capacity rather than the system node group.
+      nodeSelector:
+        provisioned-by: karpenter
+---
+###############################################################################
+# A PodDisruptionBudget is what makes consolidation safe for real workloads.
+# Without one, Karpenter is free to drain every replica at once.
+###############################################################################
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: inflate
+  namespace: default
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: inflate

@@ -1,0 +1,173 @@
+# Gate 2 (harness): DEMO-ONLY narrow grant.
+#
+# Strategic-merge patch onto the base Claude Code tool policy that adds EXACTLY three
+# mutating kubectl verbs — patch / set / rollout — so Hermes can apply the demo image
+# fix and watch it roll out. Everything else stays denied: no bypassPermissions, no
+# Secrets, no delete/create/apply/exec/scale/drain/etc. The read-only ClusterRole (RBAC)
+# still backstops it, and the SA is only granted Deployment writes (see 02).
+#
+# This is the third gate; applied by the overlay so `kubectl apply -k .` opens all three
+# at once. Revert by re-applying the base: `kubectl apply -k ../kubernetes`.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-claude-bridge-env
+  namespace: devops-agent
+data:
+  # The bridge runs `claude --permission-mode <this>`.
+  #  - The base uses `dontAsk` (read-only: auto-runs allow-listed reads, ignores writes).
+  #  - `bypassPermissions` is NOT usable here: the bridge runs as root and Claude Code
+  #    refuses `--dangerously-skip-permissions` under root ("...for security reasons").
+  # So the demo uses the standard `default` mode: in non-interactive `-p`, Claude auto-runs
+  # exactly the allow-listed tools (incl. the kubectl patch/set/rollout added below) and
+  # blocks the rest — no prompt, no --dangerously-skip-permissions. RBAC (Gate 1) still
+  # restricts the SA to Deployment writes. Reverted by `kubectl apply -k ../kubernetes`.
+  CLAUDE_CODE_PERMISSION_MODE: default
+  # Base allowlist + patch/set/rollout.
+  CLAUDE_CODE_ALLOWED_TOOLS: >-
+    Read(//opt/data/image_cache/**),
+    Read(//opt/data/skills/**),
+    Write(//opt/data/skills/**),
+    Read(//home/claude/.claude/projects/-workspace-devops-agent/memory/**),
+    Write(//home/claude/.claude/projects/-workspace-devops-agent/memory/**),
+    mcp__github-sre-readonly__*,
+    mcp__gcp-logging-sre-readonly__list_log_entries,
+    mcp__gcp-logging-sre-readonly__list_log_names,
+    mcp__gcp-logging-sre-readonly__get_bucket,
+    mcp__gcp-logging-sre-readonly__list_buckets,
+    mcp__gcp-logging-sre-readonly__get_view,
+    mcp__gcp-logging-sre-readonly__list_views,
+    mcp__gcp-monitoring-sre-readonly__list_timeseries,
+    mcp__gcp-monitoring-sre-readonly__query_range,
+    mcp__gcp-monitoring-sre-readonly__get_alert_policy,
+    mcp__gcp-monitoring-sre-readonly__list_alert_policies,
+    mcp__gcp-monitoring-sre-readonly__get_alert,
+    mcp__gcp-monitoring-sre-readonly__list_alerts,
+    mcp__gcp-monitoring-sre-readonly__list_metric_descriptors,
+    mcp__gcp-monitoring-sre-readonly__list_dashboards,
+    mcp__gcp-monitoring-sre-readonly__get_dashboard,
+    mcp__gcp-trace-sre-readonly__list_traces,
+    mcp__gcp-trace-sre-readonly__get_trace,
+    Bash(kubectl get:*),
+    Bash(kubectl describe:*),
+    Bash(kubectl logs:*),
+    Bash(kubectl top:*),
+    Bash(kubectl events:*),
+    Bash(kubectl explain:*),
+    Bash(kubectl api-resources:*),
+    Bash(kubectl api-versions:*),
+    Bash(kubectl version:*),
+    Bash(kubectl patch:*),
+    Bash(kubectl set:*),
+    Bash(kubectl rollout:*)
+  # Base denylist MINUS patch/set/rollout (still denies delete/create/apply/exec/secrets/etc.).
+  CLAUDE_CODE_DISALLOWED_TOOLS: >-
+    Edit,
+    NotebookEdit,
+    Bash(kubectl delete:*),
+    Bash(kubectl create:*),
+    Bash(kubectl apply:*),
+    Bash(kubectl edit:*),
+    Bash(kubectl replace:*),
+    Bash(kubectl scale:*),
+    Bash(kubectl annotate:*),
+    Bash(kubectl label:*),
+    Bash(kubectl cordon:*),
+    Bash(kubectl uncordon:*),
+    Bash(kubectl drain:*),
+    Bash(kubectl taint:*),
+    Bash(kubectl exec:*),
+    Bash(kubectl attach:*),
+    Bash(kubectl cp:*),
+    Bash(kubectl port-forward:*),
+    Bash(kubectl proxy:*),
+    Bash(kubectl run:*),
+    Bash(kubectl debug:*),
+    Bash(kubectl get secret:*),
+    Bash(kubectl get secrets:*),
+    Bash(kubectl describe secret:*),
+    Bash(kubectl describe secrets:*)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-claude-permissions
+  namespace: devops-agent
+data:
+  # Same narrow grant mirrored in settings.local.json (allow += 3 write verbs, deny -= them).
+  settings.local.json: |
+    {
+      "enabledMcpjsonServers": [
+        "github-sre-readonly",
+        "gcp-logging-sre-readonly",
+        "gcp-monitoring-sre-readonly",
+        "gcp-trace-sre-readonly"
+      ],
+      "permissions": {
+        "defaultMode": "default",
+        "allow": [
+          "Read(//opt/data/image_cache/**)",
+          "Read(//opt/data/skills/**)",
+          "Write(//opt/data/skills/**)",
+          "Read(//home/claude/.claude/projects/-workspace-devops-agent/memory/**)",
+          "Write(//home/claude/.claude/projects/-workspace-devops-agent/memory/**)",
+          "mcp__github-sre-readonly__*",
+          "mcp__gcp-logging-sre-readonly__list_log_entries",
+          "mcp__gcp-logging-sre-readonly__list_log_names",
+          "mcp__gcp-logging-sre-readonly__get_bucket",
+          "mcp__gcp-logging-sre-readonly__list_buckets",
+          "mcp__gcp-logging-sre-readonly__get_view",
+          "mcp__gcp-logging-sre-readonly__list_views",
+          "mcp__gcp-monitoring-sre-readonly__list_timeseries",
+          "mcp__gcp-monitoring-sre-readonly__query_range",
+          "mcp__gcp-monitoring-sre-readonly__get_alert_policy",
+          "mcp__gcp-monitoring-sre-readonly__list_alert_policies",
+          "mcp__gcp-monitoring-sre-readonly__get_alert",
+          "mcp__gcp-monitoring-sre-readonly__list_alerts",
+          "mcp__gcp-monitoring-sre-readonly__list_metric_descriptors",
+          "mcp__gcp-monitoring-sre-readonly__list_dashboards",
+          "mcp__gcp-monitoring-sre-readonly__get_dashboard",
+          "mcp__gcp-trace-sre-readonly__list_traces",
+          "mcp__gcp-trace-sre-readonly__get_trace",
+          "Bash(kubectl get:*)",
+          "Bash(kubectl describe:*)",
+          "Bash(kubectl logs:*)",
+          "Bash(kubectl top:*)",
+          "Bash(kubectl events:*)",
+          "Bash(kubectl explain:*)",
+          "Bash(kubectl api-resources:*)",
+          "Bash(kubectl api-versions:*)",
+          "Bash(kubectl version:*)",
+          "Bash(kubectl patch:*)",
+          "Bash(kubectl set:*)",
+          "Bash(kubectl rollout:*)"
+        ],
+        "deny": [
+          "Edit",
+          "NotebookEdit",
+          "Bash(kubectl delete:*)",
+          "Bash(kubectl create:*)",
+          "Bash(kubectl apply:*)",
+          "Bash(kubectl edit:*)",
+          "Bash(kubectl replace:*)",
+          "Bash(kubectl scale:*)",
+          "Bash(kubectl annotate:*)",
+          "Bash(kubectl label:*)",
+          "Bash(kubectl cordon:*)",
+          "Bash(kubectl uncordon:*)",
+          "Bash(kubectl drain:*)",
+          "Bash(kubectl taint:*)",
+          "Bash(kubectl exec:*)",
+          "Bash(kubectl attach:*)",
+          "Bash(kubectl cp:*)",
+          "Bash(kubectl port-forward:*)",
+          "Bash(kubectl proxy:*)",
+          "Bash(kubectl run:*)",
+          "Bash(kubectl debug:*)",
+          "Bash(kubectl get secret:*)",
+          "Bash(kubectl get secrets:*)",
+          "Bash(kubectl describe secret:*)",
+          "Bash(kubectl describe secrets:*)"
+        ]
+      }
+    }

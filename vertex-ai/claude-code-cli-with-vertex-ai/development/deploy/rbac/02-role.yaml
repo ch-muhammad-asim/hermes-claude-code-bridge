@@ -1,0 +1,64 @@
+# 🔐 Namespaced read-only Role.
+#
+# Mostly read-only by design: get/list/watch for normal investigation.
+# The only write verbs in this Role are create/delete for short-lived
+# diagnostic Pods in the devops-agent namespace. That development-only
+# capability lets Hermes prove network/DNS/connectivity hypotheses without
+# granting Deployment, Service, ConfigMap, Secret, or cluster-wide mutation.
+#
+# Its main read job is to grant namespace-local reads that the cluster-wide
+# ClusterRole deliberately withholds, most importantly **configmaps in
+# devops-agent** (configmaps are denied cluster-wide because teams sometimes
+# store sensitive values in them; reading them in Hermes' own namespace is fine).
+#
+# RBAC is deny-by-default: anything not listed here is forbidden. Secrets and
+# unlisted operations are absent. The diagnostic pod write permissions above
+# must be reviewed for the target namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hermes-namespace-readonly
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+rules:
+  # 👀 Core resources (read-only). Includes configmaps, which are denied
+  #    cluster-wide — this is the namespaced Role's reason to exist.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - events
+      - services
+      - configmaps
+      - endpoints
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+
+  # 🧪 Development-only proof probes. Hermes may create/delete a short-lived
+  #    diagnostic Pod in devops-agent only, then remove it immediately. This
+  #    does NOT grant deployments, services, configmaps, secrets, jobs, or
+  #    cluster-scoped writes.
+  - apiGroups: [""]
+    resources:
+      - pods
+    verbs: ["create", "delete"]
+
+  # 👀 Workloads (read-only)
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+
+  # 👀 Autoscaling / batch (read-only)
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]

@@ -1,0 +1,47 @@
+# OPTIONAL — restrict who may reach OmniRoute's proxy port.
+#
+# Not referenced by kustomization.yaml. Apply it if you want defense-in-depth for the
+# `/v1` endpoint without turning on REQUIRE_API_KEY (which cannot be seeded
+# declaratively — client keys are minted in the OmniRoute dashboard):
+#
+#   kubectl -n omniroute apply -f optional/networkpolicy.yaml
+#
+# Effect: only the Hermes pod and the ingress controller may open connections to
+# omniroute:20128. Everything else in the cluster is denied at the network layer, which
+# is a stronger guarantee than an application-level API key.
+#
+# ⚠️ Requires a CNI that enforces NetworkPolicy. GKE Dataplane V2 / Calico / Cilium do;
+# a plain kind/OrbStack cluster usually does NOT (the policy is accepted and silently
+# ignored, so verify before relying on it).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: omniroute-allow-hermes-and-ingress
+  labels:
+    app.kubernetes.io/name: omniroute
+    app.kubernetes.io/component: network-policy
+    app.kubernetes.io/part-of: omniroute
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: omniroute
+  policyTypes:
+    - Ingress
+  ingress:
+    # 1. Hermes — the only in-cluster consumer of the /v1 API.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: hermes
+      ports:
+        - protocol: TCP
+          port: 20128
+    # 2. The ingress controller, so the dashboard stays reachable through Traefik.
+    #    Adjust the namespace label if your Traefik lives elsewhere.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+      ports:
+        - protocol: TCP
+          port: 20128

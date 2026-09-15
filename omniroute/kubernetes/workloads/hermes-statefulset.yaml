@@ -1,0 +1,171 @@
+# Hermes agent, using OmniRoute as its model backend.
+#
+# No bridge sidecar: OmniRoute already exposes an OpenAI-compatible /v1 endpoint, so
+# Hermes points straight at its ClusterIP Service. A StatefulSet (not a Deployment)
+# because Hermes keeps sessions, skills and memory on a PVC under /opt/data.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hermes
+  labels:
+    app.kubernetes.io/name: hermes
+    app.kubernetes.io/component: agent
+    app.kubernetes.io/part-of: omniroute
+spec:
+  serviceName: hermes
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermes
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermes
+        app.kubernetes.io/component: agent
+        app.kubernetes.io/part-of: omniroute
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        # fsGroup ONLY — deliberately no runAsUser/runAsNonRoot here.
+        #
+        # The Hermes image is s6-overlay based: its preinit starts as root to fix
+        # /run ownership, then drops to the `hermes` user (uid 10000) via suexec.
+        # Forcing runAsUser: 10000 makes preinit die with
+        #   "fatal: /run belongs to uid 0 instead of 10000 ... lacking the privileges to fix it"
+        # and the container CrashLoopBackOffs. fsGroup is what makes the PVC writable
+        # for the dropped user, and matches the other Hermes deployments in this repo.
+        fsGroup: 10000
+      volumes:
+        - name: hermes-config-scripts
+          configMap:
+            name: hermes-omniroute-config
+            defaultMode: 0755
+      initContainers:
+        # Writes /opt/data/config.yaml: registers OmniRoute as the provider and seeds
+        # the model picker from OmniRoute's live /v1/models (free models only by default).
+        - name: init-hermes-config
+          image: nousresearch/hermes-agent:v2026.7.20
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "-lc"]
+          args: ["/scripts/init-hermes-config.sh"]
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_DEFAULT_PROVIDER
+              value: omniroute
+            # An OpenCode Zen FREE model — $0 inference. Verified end-to-end through
+            # OmniRoute with NO credentials: HTTP 200, finish_reason=stop.
+            #
+            # Chosen over the `auto/*:free` combos because those stream in a shape the
+            # Hermes TUI rejects ("Provider returned an empty stream with no
+            # finish_reason"), even though they answer fine over plain curl.
+            - name: HERMES_DEFAULT_MODEL
+              value: oc/deepseek-v4-flash-free
+            # Same namespace, so the short Service name resolves.
+            - name: HERMES_DEFAULT_BASE_URL
+              value: http://omniroute:20128/v1
+            - name: HERMES_DEFAULT_API_MODE
+              value: chat_completions
+            - name: HERMES_DEFAULT_CONTEXT_LENGTH
+              value: "200000"
+            # "*" = no restrictions: offer every model OmniRoute advertises. OmniRoute is
+            # the router and owns which providers are connected, so Hermes doesn't filter
+            # its catalogue. Set a comma-separated list here if you ever want to narrow it.
+            - name: HERMES_OMNIROUTE_MODEL_ALLOWLIST
+              value: "*"
+            # The model picked in the dashboard normally survives restarts, which also
+            # means HERMES_DEFAULT_MODEL above is ignored once /opt/data/config.yaml
+            # exists. Flip this to "true" to make the manifest authoritative again.
+            - name: HERMES_FORCE_DEFAULT_MODEL
+              value: "false"
+          envFrom:
+            # Supplies OMNIROUTE_CLIENT_API_KEY (required — OmniRoute runs with
+            # REQUIRE_API_KEY=true) plus the Hermes dashboard/API secrets.
+            - secretRef:
+                name: hermes-secrets
+          volumeMounts:
+            - name: hermes-config-scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: hermes-state
+              mountPath: /opt/data
+      containers:
+        - name: hermes
+          image: nousresearch/hermes-agent:v2026.7.20
+          imagePullPolicy: IfNotPresent
+          args: ["gateway", "run"]
+          ports:
+            - name: api
+              containerPort: 8642
+            - name: dashboard
+              containerPort: 9119
+          env:
+            - name: HERMES_HOME
+              value: /opt/data
+            - name: HERMES_SKILLS_DIR
+              value: /opt/data/skills
+            - name: HERMES_MEMORY_DIR
+              value: /opt/data/memory
+            - name: HERMES_INFERENCE_PROVIDER
+              value: omniroute
+            - name: HERMES_TUI_PROVIDER
+              value: omniroute
+            - name: API_SERVER_ENABLED
+              value: "true"
+            - name: API_SERVER_HOST
+              value: 0.0.0.0
+            - name: API_SERVER_PORT
+              value: "8642"
+            - name: HERMES_DASHBOARD
+              value: "1"
+            - name: HERMES_DASHBOARD_HOST
+              value: 0.0.0.0
+            - name: HERMES_DASHBOARD_PORT
+              value: "9119"
+            - name: HERMES_DASHBOARD_BASIC_AUTH_TTL_SECONDS
+              value: "43200"
+          envFrom:
+            - secretRef:
+                name: hermes-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              # NOT drop: ["ALL"] — that strips SETUID/SETGID, which s6-overlay's
+              # suexec needs to drop from root to the hermes user. Same narrow set
+              # as the other Hermes deployments in this repo.
+              drop:
+                - NET_RAW
+                - NET_ADMIN
+          volumeMounts:
+            - name: hermes-state
+              mountPath: /opt/data
+  volumeClaimTemplates:
+    - metadata:
+        name: hermes-state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+        # storageClassName: standard-rwo

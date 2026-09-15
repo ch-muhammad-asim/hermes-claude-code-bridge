@@ -1,0 +1,197 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-runtime-scripts
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: devops-agent
+data:
+  init-workspace.sh: |
+    #!/bin/sh
+    set -eu
+    mkdir -p "$HERMES_WORKSPACE/.claude"
+    cp /config/settings.local.json "$HERMES_WORKSPACE/.claude/settings.local.json"
+    chown -R 10000:10000 "$HERMES_WORKSPACE"
+
+  init-claude-code.sh: |
+    #!/bin/sh
+    set -eu
+    RELEASES="$CLAUDE_CODE_PREFIX/releases"
+    ACTIVE="$CLAUDE_CODE_PREFIX/current"
+    TMP="$RELEASES/claude-code.$(date +%Y%m%d%H%M%S).$$"
+    mkdir -p "$RELEASES"
+    npm install -g --prefix "$TMP" "$CLAUDE_CODE_NPM_SPEC"
+    "$TMP/bin/claude" --version
+    ln -sfn "$TMP" "$ACTIVE"
+    find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | sort -r | tail -n +4 | xargs -r rm -rf
+    echo "Claude Code active at $ACTIVE/bin/claude:"
+    "$ACTIVE/bin/claude" --version
+
+  init-kubectl.sh: |
+    #!/bin/sh
+    set -eu
+    KUBECTL_VERSION="$(curl -fsSL --retry 3 --retry-delay 2 "$KUBECTL_STABLE_URL")"
+    case "$KUBECTL_VERSION" in
+      v*) ;;
+      *) echo "Unexpected kubectl stable version: $KUBECTL_VERSION" >&2; exit 1 ;;
+    esac
+    mkdir -p "$(dirname "$KUBECTL_DEST")"
+    TMP="${KUBECTL_DEST}.tmp.$$"
+    curl -fsSL --retry 3 --retry-delay 2 -o "$TMP" \
+      "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+    chmod +x "$TMP"
+    "$TMP" version --client=true 2>/dev/null | head -1
+    mv -f "$TMP" "$KUBECTL_DEST"
+    echo "kubectl $KUBECTL_VERSION installed at $KUBECTL_DEST:"
+    "$KUBECTL_DEST" version --client=true 2>/dev/null | head -1
+
+  init-hermes-config.sh: |
+    #!/bin/bash
+    set -eu
+    mkdir -p "$HERMES_HOME" "$HERMES_HOME/image_cache" "$HERMES_SKILLS_DIR"
+    chmod 0750 "$HERMES_HOME/image_cache"
+    chmod 0750 "$HERMES_SKILLS_DIR"
+    # Ship ONLY our declarative skill(s) plus Hermes's own self-improvement skills —
+    # never the full ~69-skill bundled catalog. The .no-bundled-skills marker makes
+    # the agent's sync_skills() a no-op (see hermes tools/skills_sync.py) so nothing
+    # auto-seeds; we then explicitly retain the self-improvement skills and purge the
+    # rest (also removing any catalog a previous image seeded onto this volume).
+    touch "$HERMES_HOME/.no-bundled-skills"
+
+    # Self-improvement skills kept from the image so Hermes can configure/extend
+    # itself and author new skills. Copied flat into the skills dir (discovered by rglob).
+    SELF_IMPROVE_SKILLS="autonomous-ai-agents/hermes-agent software-development/hermes-agent-skill-authoring"
+    keep_names=""
+    for rel in $SELF_IMPROVE_SKILLS; do
+      src="/opt/hermes/skills/$rel"
+      name="$(basename "$rel")"
+      keep_names="$keep_names $name"
+      [ -d "$src" ] || continue
+      rm -rf "$HERMES_SKILLS_DIR/$name"
+      mkdir -p "$HERMES_SKILLS_DIR/$name"
+      cp -a "$src/." "$HERMES_SKILLS_DIR/$name/"
+    done
+
+    # Install our declarative skill(s).
+    if [ -d /declarative-skills ]; then
+      for f in /declarative-skills/*.SKILL.md; do
+        [ -e "$f" ] || continue
+        name="$(basename "$f" .SKILL.md)"
+        keep_names="$keep_names $name"
+        mkdir -p "$HERMES_SKILLS_DIR/$name"
+        cp "$f" "$HERMES_SKILLS_DIR/$name/SKILL.md"
+      done
+    fi
+
+    # Purge every other skill dir + stale .bundled_manifest/.curator_state.
+    find "$HERMES_SKILLS_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | while IFS= read -r entry; do
+      base="$(basename "$entry")"
+      keepit=0
+      for k in $keep_names; do [ "$base" = "$k" ] && { keepit=1; break; }; done
+      [ "$keepit" -eq 1 ] || rm -rf "$entry"
+    done
+    export HERMES_HOME
+    /opt/hermes/.venv/bin/python - <<'PY'
+    from pathlib import Path
+    import os
+    import yaml
+
+    p = Path(os.environ["HERMES_HOME"]) / "config.yaml"
+    data = yaml.safe_load(p.read_text()) if p.exists() else {}
+    data = data or {}
+
+    model_config = data.setdefault("model", {})
+    model_config.setdefault("default", os.environ.get("HERMES_DEFAULT_MODEL", os.environ.get("CLAUDE_CODE_PROXY_MODEL", "claude-opus-4-8")))
+    model_config.setdefault("provider", os.environ.get("HERMES_DEFAULT_PROVIDER", "claude-code-bridge"))
+    model_config.setdefault("base_url", os.environ.get("HERMES_DEFAULT_BASE_URL", f"http://{os.environ.get('CLAUDE_CODE_PROXY_HOST', '127.0.0.1')}:{os.environ.get('CLAUDE_CODE_PROXY_PORT', '18181')}/v1"))
+    model_config.setdefault("api_mode", os.environ.get("HERMES_DEFAULT_API_MODE", "chat_completions"))
+
+    providers = data.setdefault("providers", {})
+    providers["claude-code-bridge"] = {
+        "name": "Claude Code Bridge",
+        "base_url": os.environ.get("HERMES_DEFAULT_BASE_URL", f"http://{os.environ.get('CLAUDE_CODE_PROXY_HOST', '127.0.0.1')}:{os.environ.get('CLAUDE_CODE_PROXY_PORT', '18181')}/v1"),
+        "api_key": os.environ["CLAUDE_CODE_PROXY_API_KEY"],
+        "default_model": os.environ.get("HERMES_DEFAULT_MODEL", os.environ.get("CLAUDE_CODE_PROXY_MODEL", "claude-opus-4-8")),
+        "transport": os.environ.get("HERMES_DEFAULT_API_MODE", "chat_completions"),
+    }
+
+    previous_extra_provider_names = set(data.get("managed_extra_provider_names", []) or [])
+    loaded_provider_names = set()
+    extra_providers = os.environ.get("HERMES_EXTRA_PROVIDERS_YAML", "").strip()
+    if extra_providers:
+        loaded = yaml.safe_load(extra_providers) or {}
+        if not isinstance(loaded, dict):
+            raise TypeError("HERMES_EXTRA_PROVIDERS_YAML must be a mapping")
+        loaded_providers = loaded.get("providers", loaded)
+        if not isinstance(loaded_providers, dict):
+            raise TypeError("HERMES_EXTRA_PROVIDERS_YAML providers must be a mapping")
+        loaded_provider_names = set(loaded_providers)
+        for provider_name in previous_extra_provider_names - loaded_provider_names:
+            providers.pop(provider_name, None)
+        providers.update(loaded_providers)
+    else:
+        for provider_name in previous_extra_provider_names:
+            providers.pop(provider_name, None)
+    data["managed_extra_provider_names"] = sorted(loaded_provider_names)
+
+    mcp_servers = data.setdefault("mcp_servers", {})
+    if not isinstance(mcp_servers, dict):
+        mcp_servers = {}
+        data["mcp_servers"] = mcp_servers
+
+    # The in-pod auth bridge (gcp_mcp_auth_bridge.py) fronts the real Google MCP
+    # endpoints on loopback and injects a fresh bearer minted from the offline refresh
+    # token, so Hermes does no OAuth here. Pod containers share a network namespace, so
+    # 127.0.0.1:19190 reaches the bridge running in the claude-bridge sidecar.
+    gcp_mcp_servers = {
+        "gcp-logging-sre-readonly": {
+            "url": "http://127.0.0.1:19190/logging",
+            "tools": {
+                "include": [
+                    "list_log_entries",
+                    "list_log_names",
+                    "get_bucket",
+                    "list_buckets",
+                    "get_view",
+                    "list_views",
+                ],
+            },
+        },
+        "gcp-monitoring-sre-readonly": {
+            "url": "http://127.0.0.1:19190/monitoring",
+            "tools": {
+                "include": [
+                    "list_timeseries",
+                    "query_range",
+                    "get_alert_policy",
+                    "list_alert_policies",
+                    "get_alert",
+                    "list_alerts",
+                    "list_metric_descriptors",
+                    "list_dashboards",
+                    "get_dashboard",
+                ],
+            },
+        },
+        "gcp-trace-sre-readonly": {
+            "url": "http://127.0.0.1:19190/trace",
+            "tools": {
+                "include": [
+                    "list_traces",
+                    "get_trace",
+                ],
+            },
+        },
+    }
+    mcp_servers.update(gcp_mcp_servers)
+
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+    PY
+    chown -R 10000:10000 "$HERMES_HOME"
+
+  hermes-post-start.sh: |
+    #!/bin/sh
+    set -eu
+    test -x "$KUBECTL_DEST" && ln -sf "$KUBECTL_DEST" /usr/local/bin/kubectl || true

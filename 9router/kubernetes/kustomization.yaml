@@ -1,0 +1,22 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: 9router
+
+resources:
+  - workloads/namespace.yaml
+  - workloads/9router.yaml
+  - workloads/hermes.yaml
+
+# Secrets are NOT here on purpose — they are rendered from
+# secrets/secret.template.yaml by ./generate.sh so no plaintext ever lands in git.
+configMapGenerator:
+  - name: hermes-config
+    files:
+      - config.yaml=config/config.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: hermes
+    app.kubernetes.io/component: config
+    app.kubernetes.io/part-of: 9router

@@ -1,0 +1,42 @@
+# A deliberately broken deployment for the demo: nginx:faulty is a tag that does not
+# exist on Docker Hub, so the pod lands in ImagePullBackOff — the issue Hermes fixes.
+#
+# Namespace `demo` is separate from the agent's own `devops-agent`, so the scoped write
+# grant never touches the agent's own configuration.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo
+  labels:
+    app.kubernetes.io/part-of: opencode-devops-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: demo-nginx
+  namespace: demo
+  labels:
+    app: demo-nginx
+    app.kubernetes.io/part-of: opencode-devops-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: demo-nginx
+  template:
+    metadata:
+      labels:
+        app: demo-nginx
+    spec:
+      containers:
+        - name: demo-nginx            # container name == deployment name
+          image: nginx:faulty         # 👈 broken on purpose (nonexistent tag)
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

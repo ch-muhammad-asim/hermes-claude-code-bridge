@@ -1,0 +1,50 @@
+# 🛠️ Gate 1 (RBAC): the scoped write that lets Hermes actually FIX a pod.
+#
+# The base posture is read-only (clusterrole-readonly.yaml + role-namespace-readonly.yaml).
+# This adds the smallest set of verbs that covers real pod remediation:
+#
+#   kubectl rollout restart deployment/x     -> patch deployments
+#   kubectl set image deployment/x c=img     -> patch deployments  (the ImagePullBackOff fix)
+#   kubectl rollout undo deployment/x        -> patch deployments (+ read replicasets, already granted)
+#   kubectl scale deployment/x --replicas=N  -> update deployments/scale
+#   kubectl delete pod x                     -> delete pods       (clear a wedged/stuck pod)
+#
+# ⚠️ This ClusterRole grants NOTHING on its own. It is bound per namespace by a
+# RoleBinding (rolebinding-sre-remediation.yaml), NOT by a ClusterRoleBinding, so the
+# blast radius is exactly the namespaces you opt in - not the whole cluster. This is
+# deliberately tighter than the reference demo in ../../../hermes-agent-devops-demo,
+# which uses a ClusterRoleBinding and therefore permits Deployment writes everywhere.
+#
+# To authorize another namespace, copy the RoleBinding and change its namespace.
+# To revoke everything, delete the RoleBinding(s) - the read-only base is untouched.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: hermes-sre-remediation
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: sre-remediation
+    app.kubernetes.io/part-of: devops-agent
+rules:
+  # Workload remediation: restart, re-image, roll back, rescale.
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "update", "patch"]
+
+  # Delete a wedged pod so its controller recreates it. Pod delete is the one
+  # destructive verb granted, and it is safe precisely because pods are
+  # controller-owned and disposable - the ReplicaSet reconciles a replacement.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+
+# ⛔ Intentionally NOT granted, and therefore denied even if the model is
+#    prompt-injected into trying:
+#   - secrets (any verb)                     -> cannot read or exfiltrate credentials
+#   - create/delete on deployments           -> cannot introduce or remove workloads
+#   - statefulsets / daemonsets writes       -> cannot touch stateful or node-wide workloads
+#   - pods/exec, pods/attach, pods/portforward -> no shell into a running container
+#   - nodes, namespaces, RBAC, CRDs, webhooks -> no cluster-level or privilege changes

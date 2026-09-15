@@ -1,0 +1,249 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hermes-agent
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: devops-agent
+spec:
+  serviceName: hermes-agent
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermes-agent
+        app.kubernetes.io/component: runtime
+        app.kubernetes.io/part-of: devops-agent
+    spec:
+      serviceAccountName: hermes-agent
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 10000
+      volumes:
+        - name: opencode-bridge-script
+          configMap:
+            name: hermes-agent-opencode-bridge
+        - name: opencode-bridge-startup
+          configMap:
+            name: hermes-agent-opencode-bridge-startup
+            defaultMode: 365
+        - name: opencode-config
+          configMap:
+            name: hermes-agent-opencode-config
+        - name: runtime-scripts
+          configMap:
+            name: hermes-agent-runtime-scripts
+            defaultMode: 365
+        - name: declarative-skills
+          configMap:
+            name: hermes-agent-declarative-skills
+      initContainers:
+        # 1. Workspace the OpenCode CLI runs in (its cwd for every request).
+        - name: init-workspace
+          image: INIT_WORKSPACE_IMAGE
+          command: ["/bin/sh", "-lc"]
+          args: ["/scripts/init-workspace.sh"]
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-runtime-env
+          volumeMounts:
+            - name: agent-state
+              mountPath: /workspace/devops-agent
+              subPath: workspace
+            - name: runtime-scripts
+              mountPath: /scripts
+              readOnly: true
+        # 2. OpenCode CLI onto the PVC, so the sidecar starts ready instead of
+        #    npm-installing while Hermes is already probing it.
+        - name: init-opencode
+          image: OPENCODE_INSTALLER_IMAGE
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-lc"]
+          args: ["/scripts/init-opencode.sh"]
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-opencode-bridge-env
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: runtime-scripts
+              mountPath: /scripts
+              readOnly: true
+        # 3. The REAL kubectl (not on PATH — the read-only wrapper is).
+        - name: init-kubectl
+          image: KUBECTL_INSTALLER_IMAGE
+          command: ["/bin/sh", "-lc"]
+          args: ["/scripts/init-kubectl.sh"]
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-runtime-env
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: runtime-scripts
+              mountPath: /scripts
+              readOnly: true
+        # 4. Hermes config: seed the opencode-bridge provider + the free model catalogue.
+        - name: init-hermes-config
+          image: HERMES_IMAGE
+          command: ["/bin/bash", "-lc"]
+          args: ["/scripts/init-hermes-config.sh"]
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-runtime-env
+            - configMapRef:
+                name: hermes-agent-opencode-bridge-env
+            - secretRef:
+                name: hermes-agent-secrets
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: runtime-scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: declarative-skills
+              mountPath: /declarative-skills
+              readOnly: true
+      containers:
+        - name: hermes
+          image: HERMES_IMAGE
+          imagePullPolicy: IfNotPresent
+          args: ["gateway", "run"]
+          lifecycle:
+            postStart:
+              exec:
+                command: ["/bin/sh", "-lc", "/scripts/hermes-post-start.sh"]
+          ports:
+            - name: api
+              containerPort: 8642
+            - name: dashboard
+              containerPort: 9119
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-runtime-env
+            - secretRef:
+                name: hermes-agent-secrets
+          volumeMounts:
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+            - name: runtime-scripts
+              mountPath: /scripts
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - NET_RAW
+                - NET_ADMIN
+        - name: opencode-bridge
+          image: OPENCODE_BRIDGE_IMAGE
+          imagePullPolicy: OPENCODE_BRIDGE_IMAGE_PULL_POLICY
+          command: ["/bin/sh", "-lc"]
+          args: ["/app/start-opencode-bridge.sh"]
+          envFrom:
+            - configMapRef:
+                name: hermes-agent-opencode-bridge-env
+            - secretRef:
+                name: hermes-agent-secrets
+          ports:
+            # Documented for readability only — the bridge binds 127.0.0.1, so this port
+            # is reachable from inside the pod (i.e. from Hermes) and nowhere else.
+            - name: bridge
+              containerPort: 18282
+          volumeMounts:
+            - name: opencode-bridge-script
+              mountPath: /app/opencode_bridge.py
+              subPath: opencode_bridge.py
+              readOnly: true
+            - name: opencode-bridge-startup
+              mountPath: /app/start-opencode-bridge.sh
+              subPath: start-opencode-bridge.sh
+              readOnly: true
+            - name: opencode-bridge-startup
+              mountPath: /app/kubectl-ro
+              subPath: kubectl-ro
+              readOnly: true
+            - name: opencode-config
+              mountPath: /etc/opencode/opencode.json
+              subPath: opencode.json
+              readOnly: true
+            # HOME on the PVC: OpenCode's credential store, config, cache and state all
+            # live under it (`opencode debug paths`), so they survive restarts.
+            - name: agent-state
+              mountPath: /home/opencode
+              subPath: opencode-home
+            - name: agent-state
+              mountPath: /workspace/devops-agent
+              subPath: workspace
+            - name: agent-state
+              mountPath: /opt/data
+              subPath: hermes-data
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -lc
+                - 'curl -fsS -H "Authorization: Bearer ${OPENCODE_BRIDGE_API_KEY}" "http://${OPENCODE_BRIDGE_HOST}:${OPENCODE_BRIDGE_PORT}/health"'
+            # First boot resolves the model catalogue from `opencode models --verbose`;
+            # give it room before declaring the sidecar unready.
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              # One `opencode run` per in-flight request (max 2 by default), each a
+              # Bun process — hence a higher ceiling than the Claude sidecar's.
+              cpu: "1"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - NET_RAW
+                - NET_ADMIN
+  volumeClaimTemplates:
+    - metadata:
+        name: agent-state
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: standard-rwo
+        resources:
+          requests:
+            # Smaller than the Claude deployment's 50Gi: no model cache, and the bridge
+            # deletes each run's OpenCode session, so the volume holds the CLI releases,
+            # kubectl, Hermes state and the workspace only.
+            storage: 20Gi

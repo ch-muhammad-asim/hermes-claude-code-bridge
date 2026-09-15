@@ -1,0 +1,34 @@
+# Gate 2 (harness): DEMO-ONLY narrow grant for the OpenCode deployment.
+#
+# Strategic-merge patch onto the base bridge env ConfigMap that opens EXACTLY three
+# mutating kubectl verbs — patch / set / rollout — so Hermes can apply the demo image
+# fix and watch it roll out. Everything else stays refused by the wrapper: no delete,
+# create, apply, exec, scale, drain, cordon, port-forward, and no Secret reads.
+#
+# Why this is the whole of Gate 2 here, unlike the Claude Code demo:
+#
+#   * The Claude bridge gates writes with `--permission-mode` plus
+#     --allowedTools/--disallowedTools, so its demo overlay rewrites both lists.
+#   * OpenCode's permission model works differently — a pattern map whose catch-all is
+#     "deny" removes the bash tool WHOLESALE rather than narrowing it (verified against
+#     opencode 1.18.5), so the base grants `bash: allow` and puts the kubectl verb
+#     allowlist in the kubectl-ro wrapper instead. Opening the gate therefore means
+#     extending the wrapper's allowlist, which the base exposes as this one env var.
+#   * The base ships KUBECTL_EXTRA_WRITE_VERBS: "" (read-only). Reverting with
+#     `kubectl apply -k ../opencode/kubernetes` sets it back to empty and closes Gate 2.
+#
+# The OpenCode file-mutation policy is deliberately NOT touched: edit/write/patch stay
+# denied, so the agent still cannot rewrite manifests, skills, or its own config on the
+# PVC. It fixes the cluster through kubectl, not by editing files.
+#
+# RBAC (Gate 1) remains the hard backstop: the ServiceAccount can only patch
+# Deployments, so Secrets, deletes and every other resource are refused cluster-side
+# regardless of what this wrapper allows. Least privilege is enforced by the API
+# server, not by trusting the model.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-opencode-bridge-env
+  namespace: devops-agent
+data:
+  KUBECTL_EXTRA_WRITE_VERBS: "patch set rollout"

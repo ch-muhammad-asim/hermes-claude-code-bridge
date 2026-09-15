@@ -1,0 +1,105 @@
+global:
+  enabled: true
+  tlsDisable: false
+
+injector:
+  enabled: true
+  resources:
+    requests:
+      memory: 50Mi
+      cpu: 50m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+
+server:
+  enabled: true
+  image:
+    repository: "hashicorp/vault"
+    tag: "1.17.2"
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 500m
+    limits:
+      memory: 8Gi
+      cpu: 2000m
+  dataStorage:
+    enabled: true
+    storageClass: "gp2"  # AWS EBS storage class
+    accessMode: ReadWriteOnce
+    size: 10Gi
+  extraEnvironmentVars:
+    VAULT_SEAL_TYPE: awskms
+    VAULT_AWSKMS_SEAL_KEY_ID: "215bfd03-a18e-4211-83f0-8ad4ce616047"  # AWS KMS key ID or KMS ARN
+    VAULT_CACERT: /vault/tls/vault.ca
+    VAULT_TLSCERT: /vault/tls/vault.crt
+    VAULT_TLSKEY: /vault/tls/vault.key
+  volumes:
+    - name: tls
+      secret:
+        secretName: vault-tls
+  volumeMounts:
+    - name: tls
+      mountPath: /vault/tls
+      readOnly: true
+  standalone:
+    enabled: false
+  ha:
+    enabled: true
+    replicas: 3
+    raft:
+      enabled: true
+      setNodeId: true
+      config: |
+        
+        ui = true
+        disable_mlock = true
+        listener "tcp" {
+          tls_disable = false
+          address = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file = "/vault/tls/vault.crt"
+          tls_key_file = "/vault/tls/vault.key"
+          tls_client_ca_file = "/vault/tls/vault.ca"
+          tls_min_version = "tls12"
+        }
+        
+        storage "raft" {
+          path = "/vault/data"
+        
+        auth_config "kubernetes" {
+        kubernetes_host = "https://kubernetes.default.svc"
+        kubernetes_ca_cert = "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+        token_reviewer_jwt = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+        }
+          retry_join {
+            leader_api_addr = "https://vault-0.vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/vault.ca"
+            leader_client_cert_file = "/vault/tls/vault.crt"
+            leader_client_key_file = "/vault/tls/vault.key"
+          }
+          retry_join {
+            leader_api_addr = "https://vault-1.vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/vault.ca"
+            leader_client_cert_file = "/vault/tls/vault.crt"
+            leader_client_key_file = "/vault/tls/vault.key"
+          }
+          retry_join {
+            leader_api_addr = "https://vault-2.vault-internal:8200"
+            leader_ca_cert_file = "/vault/tls/vault.ca"
+            leader_client_cert_file = "/vault/tls/vault.crt"
+            leader_client_key_file = "/vault/tls/vault.key"
+          }
+        }
+        
+        seal "awskms" {
+          region     = "us-east-1"
+          kms_key_id = "${VAULT_AWSKMS_SEAL_KEY_ID}"
+        }
+        
+        service_registration "kubernetes" {}
+
+ui:
+  enabled: true
+  externalPort: 8200

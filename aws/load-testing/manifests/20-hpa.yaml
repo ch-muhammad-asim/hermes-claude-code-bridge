@@ -1,0 +1,55 @@
+###############################################################################
+# HPA - the first stage of the scaling chain
+#
+#   load  ->  CPU utilisation rises  ->  HPA adds pods
+#         ->  pods go Pending (no room)  ->  Karpenter adds nodes
+#
+# maxReplicas is bounded by INSTANCE COUNT, not by CPU totals. Karpenter picks
+# t3a.small (2 vCPU, ~1.3 usable once daemonsets are placed), so each node holds
+# about 5 pods at 250m. 6 replicas therefore needs ~2 nodes:
+#
+#   6 pods x 250m = 1.5 CPU  ->  ~2 x t3a.small  ->  4 EC2 instances in total
+#                                                    (2 system + 2 Karpenter)
+#
+# That leaves five instances of headroom under the sandbox's nine-instance cap.
+# Raising maxReplicas without redoing this arithmetic is how you trip the cap.
+###############################################################################
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cpu-burner
+  namespace: load-testing
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cpu-burner
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50
+  behavior:
+    scaleUp:
+      # React fast, but in bounded steps rather than one jump to maxReplicas.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+        - type: Pods
+          value: 4
+          periodSeconds: 15
+      selectPolicy: Max
+    scaleDown:
+      # Scale down slowly. Aggressive scale-down plus Karpenter consolidation
+      # produces node churn, which costs more than the idle capacity saves.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60

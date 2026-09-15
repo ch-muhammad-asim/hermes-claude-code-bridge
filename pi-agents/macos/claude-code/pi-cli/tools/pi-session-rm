@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""pi-session-rm — delete pi sessions by id or name, with a confirmation step.
+
+pi has no delete command; sessions are JSONL transcripts under
+~/.pi/agent/sessions/<cwd-slug>/. This resolves a partial id or a name, shows
+exactly what will go, and asks before removing. Deletion is permanent.
+
+Usage:
+  pi-session-rm <id|name>        delete one session (prompts first)
+  pi-session-rm <id|name> -f     skip the prompt
+  pi-session-rm --unnamed        delete every session that has no name
+  pi-session-rm --dry-run ...    show what would go, delete nothing
+"""
+import glob
+import json
+import os
+import sys
+
+ROOT = os.path.expanduser("~/.pi/agent/sessions")
+
+
+def scan(path: str):
+    sid = name = None
+    lines = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                lines += 1
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "session" and event.get("id"):
+                    sid = event["id"]
+                elif event.get("type") == "session_info" and event.get("name"):
+                    name = event["name"]
+    except OSError:
+        return None, None, 0
+    if not sid:
+        sid = os.path.basename(path).split("_")[-1].removesuffix(".jsonl")
+    return sid, name, lines
+
+
+def describe(path, sid, name, lines):
+    return (f"  {sid}  {name or '—':14} {lines:5} lines  "
+            f"{os.path.getsize(path) // 1024}K")
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    force = "-f" in args or "--force" in args
+    dry = "--dry-run" in args
+    unnamed = "--unnamed" in args
+    needle = next((a for a in args if not a.startswith("-")), None)
+
+    if not needle and not unnamed:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+
+    matches = []
+    for path in glob.glob(f"{ROOT}/*/*.jsonl"):
+        sid, name, lines = scan(path)
+        if unnamed:
+            if not name:
+                matches.append((path, sid, name, lines))
+        elif needle.lower() in (sid or "").lower() or needle.lower() == (name or "").lower():
+            matches.append((path, sid, name, lines))
+
+    if not matches:
+        print(f"no session matches {needle!r}" if needle else "no unnamed sessions",
+              file=sys.stderr)
+        return 1
+
+    # An ambiguous prefix must not silently delete the wrong transcript.
+    if needle and len(matches) > 1:
+        print(f"{needle!r} matches {len(matches)} sessions — be more specific:", file=sys.stderr)
+        for path, sid, name, lines in matches:
+            print(describe(path, sid, name, lines), file=sys.stderr)
+        return 1
+
+    print(f"{'Would delete' if dry else 'Delete'} {len(matches)} session(s):")
+    for path, sid, name, lines in matches:
+        print(describe(path, sid, name, lines))
+
+    if dry:
+        return 0
+
+    if not force:
+        try:
+            if input("\nType 'yes' to confirm: ").strip().lower() != "yes":
+                print("aborted", file=sys.stderr)
+                return 1
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return 1
+
+    for path, sid, _name, _lines in matches:
+        try:
+            os.remove(path)
+            print(f"removed {sid}")
+        except OSError as exc:
+            print(f"could not remove {path}: {exc}", file=sys.stderr)
+
+    # Drop project directories the deletion left empty.
+    for d in glob.glob(f"{ROOT}/*"):
+        if os.path.isdir(d) and not os.listdir(d):
+            try:
+                os.rmdir(d)
+            except OSError:
+                pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,34 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# ── Demo overlay ───────────────────────────────────────────────────────────
+# Layers on top of the read-only base (../kubernetes) and, on `kubectl apply -k`:
+#   • deploys the broken Deployment (01) into namespace `demo`
+#   • grants the scoped RBAC write (Gate 1, 02)
+#   • overrides the active Hermes skill with the demo-writer variant (Gate 3, 03)
+# Deploy with `kubectl apply -k .` (NOT `-f` — this is a Kustomize overlay).
+# Gate 2 (harness tool policy) stays a documented runtime patch — see README —
+# so this security-first repo never commits a `bypassPermissions` posture to git.
+resources:
+- ../kubernetes
+- 01-broken-deployment.yaml
+- 02-grant-deploy-write.yaml
+
+# Gate 2 (harness): declaratively open a NARROW write path in the Claude Code tool
+# policy (patch/set/rollout only) so `apply -k .` opens all three gates at once — no
+# runtime `kubectl patch`, no ordering trap. Reverted by `kubectl apply -k ../kubernetes`.
+patches:
+- path: 04-grant-harness-write.yaml
+
+# Override just the `lead-devops-sre.SKILL.md` key of the existing skill ConfigMap.
+# `behavior: merge` keeps the base ConfigMap and swaps this one file, so init-hermes-config
+# syncs the demo-writer skill to /opt/data/skills on the next roll — auto, on deploy.
+configMapGenerator:
+- name: hermes-agent-declarative-skills
+  namespace: devops-agent
+  behavior: merge
+  files:
+  - lead-devops-sre.SKILL.md=03-demo-writer.SKILL.md
+
+generatorOptions:
+  disableNameSuffixHash: true

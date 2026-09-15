@@ -1,0 +1,46 @@
+# AWS Load Balancer Controller values for Amazon EKS.
+# Chart: eks/aws-load-balancer-controller v3.5.0 (keep in sync with CHART_VERSION in ./README.md)
+
+# Must match the cluster name, or the controller cannot resolve the VPC and
+# every reconcile fails.
+clusterName: cloudgeeks-eks-dev
+
+# The controller must not run on Karpenter-managed nodes it may itself drain
+# while an ALB reconcile is in flight.
+nodeSelector:
+  workload-type: system
+
+serviceAccount:
+  create: true
+  # Name is load-bearing: the EKS Pod Identity association created by the
+  # alb-controller-iam Terragrunt unit binds to exactly this name. No IRSA
+  # annotation is needed - Pod Identity supplies the credentials.
+  name: aws-load-balancer-controller
+
+# Two replicas with leader election; the chart sets pod anti-affinity so they
+# do not share a node.
+replicaCount: 2
+
+# Discovered from the cluster, but setting them explicitly removes a startup
+# lookup and makes failures obvious rather than silent.
+region: us-east-1
+vpcId: vpc-068f714edbfb5e998
+
+# Let the controller manage the IngressClass so Ingress objects can simply
+# reference ingressClassName: alb.
+createIngressClassResource: true
+ingressClass: alb
+
+enableServiceMutatorWebhook: true
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+logLevel: info

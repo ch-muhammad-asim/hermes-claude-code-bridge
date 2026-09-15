@@ -1,0 +1,93 @@
+###############################################################################
+# End-to-end proof for the AWS Load Balancer Controller
+#
+# Creates a namespace, a small HTTP app and an Ingress. The controller turns the
+# Ingress into a real internet-facing ALB with an IP-mode target group pointing
+# straight at the pods.
+###############################################################################
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: alb-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: alb-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+    spec:
+      containers:
+        - name: echo
+          image: ealen/echo-server:latest
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            - name: PORT
+              value: "80"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: alb-demo
+spec:
+  # NodePort, not LoadBalancer: the ALB is created by the Ingress, and in IP
+  # target mode it reaches the pods directly.
+  type: NodePort
+  selector:
+    app: echo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo
+  namespace: alb-demo
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # ip mode registers pod IPs directly - fewer hops than instance mode, and it
+    # works with Fargate. instance mode requires a NodePort on every node.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/tags: Environment=dev,Blueprint=cloudgeeks-eks-dev
+    # Ingresses sharing a group land on one ALB instead of one ALB each, which
+    # is the single biggest cost lever with this controller.
+    alb.ingress.kubernetes.io/group.name: cloudgeeks-dev
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo
+                port:
+                  number: 80

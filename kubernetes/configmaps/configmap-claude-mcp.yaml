@@ -1,0 +1,72 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hermes-agent-claude-mcp
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: claude-mcp
+    app.kubernetes.io/part-of: devops-agent
+data:
+  .mcp.json: |
+    {
+      "mcpServers": {
+        "github-sre-readonly": {
+          "type": "stdio",
+          "command": "/github-mcp/start-github-mcp.sh",
+          "args": []
+        },
+        "gcp-logging-sre-readonly": {
+          "type": "http",
+          "url": "http://127.0.0.1:19190/logging"
+        },
+        "gcp-monitoring-sre-readonly": {
+          "type": "http",
+          "url": "http://127.0.0.1:19190/monitoring"
+        },
+        "gcp-trace-sre-readonly": {
+          "type": "http",
+          "url": "http://127.0.0.1:19190/trace"
+        }
+      }
+    }
+  start-github-mcp.sh: |
+    #!/bin/sh
+    set -eu
+
+    : "${GITHUB_APP_ID:?GITHUB_APP_ID is required}"
+    : "${GITHUB_APP_INSTALLATION_ID:?GITHUB_APP_INSTALLATION_ID is required}"
+    : "${GITHUB_APP_PRIVATE_KEY_FILE:?GITHUB_APP_PRIVATE_KEY_FILE is required}"
+    : "${GITHUB_MCP_BIN:?GITHUB_MCP_BIN is required}"
+
+    test -r "$GITHUB_APP_PRIVATE_KEY_FILE"
+    test -x "$GITHUB_MCP_BIN"
+
+    base64url() {
+      openssl base64 -A | tr '+/' '-_' | tr -d '='
+    }
+
+    now="$(date +%s)"
+    issued_at="$((now - 60))"
+    expires_at="$((now + 540))"
+    header="$(printf '%s' '{"alg":"RS256","typ":"JWT"}' | base64url)"
+    payload="$(printf '{"iat":%s,"exp":%s,"iss":"%s"}' \
+      "$issued_at" "$expires_at" "$GITHUB_APP_ID" | base64url)"
+    unsigned_token="${header}.${payload}"
+    signature="$(printf '%s' "$unsigned_token" | \
+      openssl dgst -sha256 -sign "$GITHUB_APP_PRIVATE_KEY_FILE" | base64url)"
+    app_jwt="${unsigned_token}.${signature}"
+
+    token_response="$(curl -fsS --retry 3 --retry-delay 2 \
+      -X POST \
+      -H "Authorization: Bearer ${app_jwt}" \
+      -H 'Accept: application/vnd.github+json' \
+      -H 'X-GitHub-Api-Version: 2022-11-28' \
+      "https://api.github.com/app/installations/${GITHUB_APP_INSTALLATION_ID}/access_tokens")"
+    installation_token="$(printf '%s' "$token_response" | jq -er '.token')"
+
+    unset app_jwt token_response signature unsigned_token
+    export GITHUB_PERSONAL_ACCESS_TOKEN="$installation_token"
+    export GITHUB_READ_ONLY=1
+    export GITHUB_TOOLSETS='repos,pull_requests,actions'
+    exec "$GITHUB_MCP_BIN" stdio

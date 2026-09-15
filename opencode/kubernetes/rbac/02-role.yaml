@@ -1,0 +1,55 @@
+# 🔐 Namespaced read-only Role.
+#
+# Read-only by design: get/list/watch only — no create/patch/update/delete.
+# Its one job is to grant namespace-local reads that the cluster-wide
+# ClusterRole deliberately withholds, most importantly **configmaps in
+# devops-agent** (configmaps are denied cluster-wide because teams sometimes
+# store sensitive values in them; reading them in Hermes' own namespace is fine).
+#
+# RBAC is deny-by-default: anything not listed here is forbidden. Secrets and
+# every write verb are absent, so they fail at the API server even if the LLM
+# is prompt-injected.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: hermes-namespace-readonly
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: devops-rbac
+    app.kubernetes.io/part-of: devops-agent
+rules:
+  # 👀 Core resources (read-only). Includes configmaps, which are denied
+  #    cluster-wide — this is the namespaced Role's reason to exist.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - pods/log
+      - events
+      - services
+      - configmaps
+      - endpoints
+      - persistentvolumeclaims
+    verbs: ["get", "list", "watch"]
+
+  # 👀 Workloads (read-only)
+  - apiGroups: ["apps"]
+    resources:
+      - deployments
+      - replicasets
+      - statefulsets
+      - daemonsets
+    verbs: ["get", "list", "watch"]
+
+  # 👀 Autoscaling / batch (read-only)
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch"]
+
+# ⛔ Intentionally NOT granted (and therefore denied):
+#   - secrets                        (any verb)  → cannot read or exfiltrate credentials
+#   - create/patch/update/delete     (any resource) → no restart, scale, edit, or delete
+#   - namespaces / pvcs writes ; any cluster-scoped resource

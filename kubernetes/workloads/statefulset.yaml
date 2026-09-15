@@ -1,0 +1,311 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hermes-agent
+  namespace: devops-agent
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: runtime
+    app.kubernetes.io/part-of: devops-agent
+spec:
+  serviceName: hermes-agent
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hermes-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hermes-agent
+        app.kubernetes.io/component: runtime
+        app.kubernetes.io/part-of: devops-agent
+    spec:
+      serviceAccountName: hermes-agent
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        cloud.google.com/gke-nodepool: default-pool
+      securityContext:
+        fsGroup: 10000
+      volumes:
+      - name: claude-permissions
+        configMap:
+          name: hermes-agent-claude-permissions
+      - name: claude-mcp
+        configMap:
+          name: hermes-agent-claude-mcp
+          defaultMode: 365
+      - name: github-app-credentials
+        secret:
+          secretName: hermes-agent-github-app
+          optional: true          # MCP is optional; pod starts without this Secret
+          defaultMode: 256
+          items:
+          - key: private-key.pem
+            path: private-key.pem
+      - name: claude-bridge-script
+        configMap:
+          name: hermes-agent-claude-bridge
+      - name: claude-bridge-startup
+        configMap:
+          name: hermes-agent-claude-bridge-startup
+          defaultMode: 365
+      - name: runtime-scripts
+        configMap:
+          name: hermes-agent-runtime-scripts
+          defaultMode: 365
+      - name: declarative-skills
+        configMap:
+          name: hermes-agent-declarative-skills
+      initContainers:
+      - name: init-workspace
+        image: INIT_WORKSPACE_IMAGE
+        command:
+        - /bin/sh
+        - -lc
+        args:
+        - /scripts/init-workspace.sh
+        volumeMounts:
+        - name: agent-state
+          mountPath: /workspace/devops-agent
+          subPath: workspace
+        - name: claude-permissions
+          mountPath: /config
+          readOnly: true
+        - name: runtime-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: declarative-skills
+          mountPath: /declarative-skills
+          readOnly: true
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-runtime-env
+      - name: init-claude-code
+        image: CLAUDE_CODE_INSTALLER_IMAGE
+        imagePullPolicy: IfNotPresent
+        command:
+        - /bin/sh
+        - -lc
+        args:
+        - /scripts/init-claude-code.sh
+        volumeMounts:
+        - name: agent-state
+          mountPath: /opt/data
+          subPath: hermes-data
+        - name: runtime-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: declarative-skills
+          mountPath: /declarative-skills
+          readOnly: true
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-claude-bridge-env
+      - name: init-kubectl
+        image: KUBECTL_INSTALLER_IMAGE
+        command:
+        - /bin/sh
+        - -lc
+        args:
+        - /scripts/init-kubectl.sh
+        volumeMounts:
+        - name: agent-state
+          mountPath: /opt/data
+          subPath: hermes-data
+        - name: runtime-scripts
+          mountPath: /scripts
+          readOnly: true
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-runtime-env
+      - name: init-hermes-config
+        image: HERMES_IMAGE
+        command:
+        - /bin/bash
+        - -lc
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-runtime-env
+        - configMapRef:
+            name: hermes-agent-claude-bridge-env
+        - secretRef:
+            name: hermes-agent-secrets
+        - secretRef:
+            name: hermes-agent-google-oauth
+            optional: true       # optional: only set for GCP MCP OAuth-app auth
+        args:
+        - /scripts/init-hermes-config.sh
+        volumeMounts:
+        - name: agent-state
+          mountPath: /opt/data
+          subPath: hermes-data
+        - name: runtime-scripts
+          mountPath: /scripts
+          readOnly: true
+        - name: declarative-skills
+          mountPath: /declarative-skills
+          readOnly: true
+      containers:
+      - name: hermes
+        image: HERMES_IMAGE
+        imagePullPolicy: IfNotPresent
+        args:
+        - gateway
+        - run
+        lifecycle:
+          postStart:
+            exec:
+              command:
+              - /bin/sh
+              - -lc
+              - /scripts/hermes-post-start.sh
+        ports:
+        - name: api
+          containerPort: 8642
+        - name: dashboard
+          containerPort: 9119
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-runtime-env
+        - secretRef:
+            name: hermes-agent-secrets
+        - secretRef:
+            name: hermes-agent-google-oauth
+            optional: true       # optional: only set for GCP MCP OAuth-app auth
+        volumeMounts:
+        - name: agent-state
+          mountPath: /opt/data
+          subPath: hermes-data
+        - name: runtime-scripts
+          mountPath: /scripts
+          readOnly: true
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: api
+          initialDelaySeconds: 20
+          periodSeconds: 10
+          timeoutSeconds: 3
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: api
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 5
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1Gi
+          limits:
+            cpu: '2'
+            memory: 4Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - NET_RAW
+            - NET_ADMIN
+      - name: claude-bridge
+        image: CLAUDE_BRIDGE_IMAGE
+        imagePullPolicy: CLAUDE_BRIDGE_IMAGE_PULL_POLICY
+        command:
+        - /bin/sh
+        - -lc
+        envFrom:
+        - configMapRef:
+            name: hermes-agent-claude-bridge-env
+        - secretRef:
+            name: hermes-agent-secrets
+        - secretRef:
+            name: hermes-agent-google-oauth
+            optional: true       # optional: only set for GCP MCP OAuth-app auth
+        env:
+        - name: GITHUB_APP_ID
+          valueFrom:
+            secretKeyRef:
+              name: hermes-agent-github-app
+              key: app-id
+              optional: true
+        - name: GITHUB_APP_INSTALLATION_ID
+          valueFrom:
+            secretKeyRef:
+              name: hermes-agent-github-app
+              key: installation-id
+              optional: true
+        - name: MCP_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: hermes-agent-google-oauth
+              key: GOOGLE_MCP_OAUTH_CLIENT_SECRET
+              optional: true
+        args:
+        - /app/start-claude-bridge.sh
+        ports:
+        - name: bridge
+          containerPort: 18181
+        volumeMounts:
+        - name: claude-bridge-script
+          mountPath: /app/claude_code_bridge.py
+          subPath: claude_code_bridge.py
+          readOnly: true
+        - name: claude-bridge-script
+          mountPath: /app/gcp_mcp_auth_bridge.py
+          subPath: gcp_mcp_auth_bridge.py
+          readOnly: true
+        - name: claude-bridge-startup
+          mountPath: /app/start-claude-bridge.sh
+          subPath: start-claude-bridge.sh
+          readOnly: true
+        - name: agent-state
+          mountPath: /home/claude
+          subPath: claude-home
+        - name: agent-state
+          mountPath: /workspace/devops-agent
+          subPath: workspace
+        - name: claude-mcp
+          mountPath: /workspace/devops-agent/.mcp.json
+          subPath: .mcp.json
+          readOnly: true
+        - name: claude-mcp
+          mountPath: /github-mcp/start-github-mcp.sh
+          subPath: start-github-mcp.sh
+          readOnly: true
+        - name: github-app-credentials
+          mountPath: /var/run/secrets/hermes-github-app
+          readOnly: true
+        - name: agent-state
+          mountPath: /opt/data
+          subPath: hermes-data
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -lc
+            - 'curl -fsS -H "Authorization: Bearer ${CLAUDE_CODE_PROXY_API_KEY}" "http://${CLAUDE_CODE_PROXY_HOST}:${CLAUDE_CODE_PROXY_PORT}/health"'
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+          limits:
+            cpu: '1'
+            memory: 2Gi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - NET_RAW
+            - NET_ADMIN
+  volumeClaimTemplates:
+  - metadata:
+      name: agent-state
+    spec:
+      accessModes:
+      - ReadWriteOnce
+      storageClassName: standard-rwo
+      resources:
+        requests:
+          storage: 50Gi

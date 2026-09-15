@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""pi-sessions — list pi sessions with id, name, size and project.
+
+pi itself has no non-interactive session list (`--resume` is a picker, `pi list`
+is for extensions), so read the transcripts directly.
+
+Usage:
+  pi-sessions                 all sessions, newest first
+  pi-sessions <filter>        only rows whose name/id/project match (case-insensitive)
+  pi-sessions --named         only sessions that have a name
+  pi-sessions --here          only sessions for the current directory
+"""
+import glob
+import json
+import os
+import sys
+import time
+
+ROOT = os.path.expanduser("~/.pi/agent/sessions")
+
+
+def slug(path: str) -> str:
+    """pi derives a project dir name from the cwd; turn it back into a path."""
+    return "/" + os.path.basename(path).strip("-").replace("-", "/")
+
+
+def scan(path: str):
+    """Return (session_id, name, line_count) for one transcript."""
+    sid = name = None
+    lines = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                lines += 1
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if event.get("type") == "session" and event.get("id"):
+                    sid = event["id"]
+                elif event.get("type") == "session_info" and event.get("name"):
+                    name = event["name"]
+    except OSError:
+        return None, None, 0
+    # Fall back to the uuid embedded in the filename if the header is missing.
+    if not sid:
+        sid = os.path.basename(path).split("_")[-1].removesuffix(".jsonl")
+    return sid, name, lines
+
+
+def main() -> int:
+    args = [a for a in sys.argv[1:]]
+    named_only = "--named" in args
+    here_only = "--here" in args
+    needle = next((a.lower() for a in args if not a.startswith("--")), None)
+    cwd = os.getcwd()
+
+    rows = []
+    for path in glob.glob(f"{ROOT}/*/*.jsonl"):
+        project = slug(os.path.dirname(path))
+        if here_only and project != cwd:
+            continue
+        sid, name, lines = scan(path)
+        if named_only and not name:
+            continue
+        if needle and needle not in f"{sid} {name or ''} {project}".lower():
+            continue
+        rows.append((os.path.getmtime(path), sid, name, lines,
+                     os.path.getsize(path), project))
+
+    if not rows:
+        print("no sessions found", file=sys.stderr)
+        return 1
+
+    rows.sort(reverse=True)
+    total = sum(r[4] for r in rows)
+    print(f"{'SESSION ID':38} {'NAME':14} {'LINES':>6} {'SIZE':>7}  {'MODIFIED':12} PROJECT")
+    for mtime, sid, name, lines, size, project in rows:
+        when = time.strftime("%d %b %H:%M", time.localtime(mtime))
+        print(f"{sid:38} {(name or '—'):14} {lines:6} {size // 1024:6}K  {when:12} {project}")
+    print(f"\n{len(rows)} session(s), {total / 1048576:.1f} MB"
+          f"   ·   resume with:  pi --session <id>", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

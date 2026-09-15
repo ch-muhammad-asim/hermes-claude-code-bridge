@@ -1,0 +1,117 @@
+# OmniRoute — OPTIONAL Redis (shared rate-limit state).
+#
+# Not referenced by kustomization.yaml, mirroring the opt-in `--profile redis` in
+# the Compose stack. OmniRoute runs perfectly without it: when REDIS_URL is unset
+# it logs "REDIS_URL is not set in production. Using in-memory rate limiting."
+# which is correct for a single replica.
+#
+# Apply it only if you want rate-limit counters to survive an OmniRoute restart
+# or be shared with something else:
+#
+#   kubectl -n omniroute apply -f optional/redis.yaml
+#   kubectl -n omniroute patch secret omniroute-secrets --type merge \
+#     -p '{"stringData":{"REDIS_URL":"redis://redis.omniroute.svc.cluster.local:6379"}}'
+#   kubectl -n omniroute rollout restart statefulset/omniroute
+#
+# A Deployment (not a StatefulSet) with emptyDir is deliberate: rate-limit
+# counters are a transient cache, so there is nothing worth persisting to a PVC —
+# losing them on restart simply resets the windows. RDB/AOF are therefore off and
+# an LRU cap keeps memory bounded.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: rate-limit-cache
+    app.kubernetes.io/part-of: omniroute
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: rate-limit-cache
+        app.kubernetes.io/part-of: omniroute
+    spec:
+      securityContext:
+        # The official redis image runs as uid/gid 999.
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          imagePullPolicy: IfNotPresent
+          args:
+            # Pure cache: no RDB snapshots, no AOF, bounded memory with LRU
+            # eviction so a burst of counters can never OOM the pod.
+            - redis-server
+            - --save
+            - ""
+            - --appendonly
+            - "no"
+            - --maxmemory
+            - 192mb
+            - --maxmemory-policy
+            - allkeys-lru
+            - --loglevel
+            - warning
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              # Above --maxmemory so eviction engages before the kernel OOM-kills.
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        # Ephemeral on purpose — see the header note.
+        - name: data
+          emptyDir: {}
+---
+# Service name + namespace produce exactly the FQDN referenced in
+# secrets/secret.template.yaml: redis.omniroute.svc.cluster.local:6379
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: rate-limit-cache
+    app.kubernetes.io/part-of: omniroute
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis

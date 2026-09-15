@@ -1,0 +1,115 @@
+###############################################################################
+# resource-consumer - the workload under test
+#
+# The same image Kubernetes' own HPA end-to-end tests use. It exposes an HTTP
+# endpoint that burns a requested number of millicores for a requested number
+# of seconds, which makes the load deterministic: the test states how much CPU
+# it is asking for instead of hammering a web server and hoping.
+#
+# It is a static Go binary, so it runs happily as a non-root user under the
+# restricted Pod Security Standard.
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-burner
+  namespace: load-testing
+  labels:
+    app: cpu-burner
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cpu-burner
+  template:
+    metadata:
+      labels:
+        app: cpu-burner
+    spec:
+      # Run on Karpenter-provisioned capacity, not the system node group.
+      nodeSelector:
+        provisioned-by: karpenter
+
+      # Spread replicas across nodes and zones so the test exercises
+      # multi-node provisioning instead of stacking onto one node.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cpu-burner
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: cpu-burner
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: cpu-burner
+          image: registry.k8s.io/e2e-test-images/resource-consumer:1.13
+          ports:
+            - name: http
+              containerPort: 8080
+          # requests drive both HPA maths and Karpenter's bin-packing; limits
+          # cap a single pod's blast radius. A 250m request against a 500m
+          # limit lets a pod burst while keeping the scheduler's view honest.
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cpu-burner
+  namespace: load-testing
+spec:
+  selector:
+    app: cpu-burner
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+###############################################################################
+# Without a PDB, Karpenter's consolidation may drain every replica at once when
+# it repacks nodes after the load subsides.
+###############################################################################
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: cpu-burner
+  namespace: load-testing
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: cpu-burner

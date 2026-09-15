@@ -1,0 +1,49 @@
+{
+  "gcp-logging-sre-readonly": {
+    "url": "http://127.0.0.1:19190/logging",
+    "tools": {
+      "include": [
+        "list_log_entries",
+        "list_log_names"
+      ]
+    }
+  },
+  "gcp-monitoring-sre-readonly": {
+    "url": "http://127.0.0.1:19190/monitoring",
+    "tools": {
+      "include": [
+        "list_timeseries",
+        "query_range",
+        "get_alert_policy",
+        "list_alert_policies",
+        "get_alert",
+        "list_alerts",
+        "list_metric_descriptors"
+      ]
+    }
+  },
+  "gcp-trace-sre-readonly": {
+    "url": "http://127.0.0.1:19190/trace",
+    "tools": {
+      "include": [
+        "list_traces",
+        "get_trace"
+      ]
+    }
+  },
+  "playwright-browser": {
+    "url": "http://localhost:8931/mcp",
+    "timeout": 120,
+    "connect_timeout": 60,
+    "tools": {
+      "include": [
+        "browser_navigate",
+        "browser_snapshot",
+        "browser_console_messages",
+        "browser_network_requests",
+        "browser_take_screenshot",
+        "browser_close"
+      ]
+    }
+  }
+}

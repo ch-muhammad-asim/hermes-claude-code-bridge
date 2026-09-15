@@ -1,0 +1,133 @@
+###############################################################################
+# Host-based IngressRoute - app.saqlainmushtaq.com
+#
+# Routes a real hostname through Traefik to the demo backend. Unlike the
+# path-based example, this matches on Host(), which is what you want in
+# production: one NLB, many hostnames, no path rewriting.
+#
+# DNS: point app.saqlainmushtaq.com at the Traefik NLB with a CNAME.
+#   kubectl -n traefik get svc traefik \
+#     -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+###############################################################################
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: app-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app
+  namespace: app-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: app
+  template:
+    metadata:
+      labels:
+        app: app
+    spec:
+      containers:
+        - name: whoami
+          image: traefik/whoami:v1.10.4
+          ports:
+            - name: http
+              containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: app
+  namespace: app-demo
+spec:
+  selector:
+    app: app
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+###############################################################################
+# Security headers - the kind of thing that is a Middleware in Traefik and an
+# annotation soup (or nothing at all) elsewhere.
+###############################################################################
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: security-headers
+  namespace: app-demo
+spec:
+  headers:
+    frameDeny: true
+    contentTypeNosniff: true
+    browserXssFilter: true
+    referrerPolicy: strict-origin-when-cross-origin
+    stsSeconds: 31536000
+    stsIncludeSubdomains: true
+    customResponseHeaders:
+      X-Served-By: traefik-eks
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: app
+  namespace: app-demo
+  annotations:
+    # Required: eks-values.yaml sets providers.kubernetesCRD.ingressClass, so an
+    # IngressRoute without this annotation is silently ignored and the NLB
+    # answers 404.
+    kubernetes.io/ingress.class: traefik-external
+spec:
+  # Both entrypoints. Serving only `web` is the classic Cloudflare failure: with
+  # SSL mode "Full" (the default) Cloudflare connects to the origin over HTTPS
+  # on 443, finds no router on websecure, and returns Traefik's bare
+  # "404 page not found" - even though port 80 works perfectly when tested
+  # directly.
+  entryPoints:
+    - web
+    - websecure
+  routes:
+    - match: Host(`app.saqlainmushtaq.com`)
+      kind: Rule
+      middlewares:
+        - name: security-headers
+      services:
+        - name: app
+          port: 80
+  # Empty tls block = terminate TLS with Traefik's built-in default certificate.
+  # It is self-signed, which Cloudflare "Full" accepts because it does not
+  # validate the origin certificate. For "Full (strict)" install a Cloudflare
+  # Origin CA certificate and reference it as secretName below.
+  tls: {}
+---
+###############################################################################
+# Full (strict) with a Cloudflare Origin CA certificate
+#
+# Generate the certificate in Cloudflare (SSL/TLS -> Origin Server -> Create
+# Certificate), then:
+#
+#   kubectl -n app-demo create secret tls app-tls \
+#     --cert=origin.pem --key=origin-key.pem
+#
+# and swap the empty tls block above for:
+#
+#   tls:
+#     secretName: app-tls
+#
+# Cloudflare then validates the origin certificate, and the hop between
+# Cloudflare and the NLB is authenticated rather than merely encrypted.
+###############################################################################

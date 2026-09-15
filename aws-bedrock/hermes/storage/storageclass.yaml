@@ -1,0 +1,31 @@
+# 💾 gp3 StorageClass for the agent's state volume.
+#
+# Why this file exists: the Vertex/GKE manifests ask for `standard-rwo`, a GKE
+# StorageClass that does not exist on EKS - the PVC would sit Pending forever with
+# "storageclass.storage.k8s.io \"standard-rwo\" not found". EKS ships a `gp2` default
+# instead, so rather than depend on whatever the cluster happens to default to, the
+# class the StatefulSet wants is declared here.
+#
+# gp3 over gp2: same price per GB, 3000 IOPS and 125 MiB/s baseline included
+# (gp2 derives IOPS from volume size - a 20Gi gp2 gets only 100 IOPS).
+#
+# Provisioned by the aws-ebs-csi-driver add-on, which modules/eks installs with an
+# EKS Pod Identity association. Not marked default: leaving EKS's gp2 as the cluster
+# default avoids surprising every other workload.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3
+  labels:
+    app.kubernetes.io/part-of: devops-agent
+provisioner: ebs.csi.aws.com
+parameters:
+  type: gp3
+  encrypted: "true"
+# WaitForFirstConsumer, not Immediate: an EBS volume is single-AZ, so it must be
+# created in the AZ the pod is actually scheduled into. Immediate binding provisions
+# the volume first and can strand the pod with a
+# "volume node affinity conflict" it can never satisfy.
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete

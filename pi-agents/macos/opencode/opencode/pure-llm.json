@@ -1,0 +1,24 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "read": "deny",
+    "list": "deny",
+    "glob": "deny",
+    "grep": "deny",
+    "bash": "deny",
+    "edit": "deny",
+    "write": "deny",
+    "patch": "deny",
+    "task": "deny",
+    "todowrite": "deny",
+    "todoread": "deny",
+    "skill": "deny",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "external_directory": "deny",
+    "doom_loop": "deny"
+  },
+  "autoupdate": false,
+  "share": "disabled",
+  "logLevel": "WARN"
+}

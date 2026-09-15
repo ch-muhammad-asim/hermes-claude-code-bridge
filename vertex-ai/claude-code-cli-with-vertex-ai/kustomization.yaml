@@ -1,0 +1,25 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: devops-agent
+resources:
+  - development/deploy
+configMapGenerator:
+  - name: hermes-agent-vertex-bridge
+    files:
+      - vertex_claude_bridge.py=src/vertex_claude_bridge.py
+  - name: hermes-agent-gcp-mcp-auth-bridge
+    files:
+      - gcp_mcp_auth_bridge.py=development/deploy/gcp-mcp/gcp_mcp_auth_bridge.py
+  - name: hermes-agent-claude-code
+    files:
+      - development/src/native_provider.py
+      - development/src/hermes_executor.py
+      - development/src/claude_code_bridge.py
+      - development/src/claude_env.py
+      - development/src/drain_native.py
+  - name: hermes-agent-runtime-identity
+    files:
+      - development/deploy/identity/SOUL.md
+  - name: hermes-agent-lead-devops-sre-skill
+    files:
+      - development/deploy/skills/lead-devops-sre/SKILL.md

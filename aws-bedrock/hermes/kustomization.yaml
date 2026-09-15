@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+# Self-contained Kustomize root for the Hermes + Bedrock deployment:
+#   kubectl apply -k .
+#
+# Everything except the Secrets is here. Secrets are rendered from the environment
+# (secrets/secret.template.yaml + envsubst) so no credential is ever committed, and
+# Bedrock itself needs no credential at all - see rbac/serviceaccount.yaml.
+resources:
+  - rbac/namespace.yaml
+  - rbac/namespace-demo.yaml
+  - rbac/serviceaccount.yaml
+  - rbac/clusterrole-readonly.yaml
+  - rbac/role-namespace-readonly.yaml
+  - rbac/rolebinding-namespace-readonly.yaml
+  # Gate 1: the scoped write that lets the agent fix a pod. The ClusterRole grants
+  # nothing by itself; the RoleBinding scopes it to the `demo` namespace only.
+  - rbac/clusterrole-sre-remediation.yaml
+  - rbac/rolebinding-sre-remediation.yaml
+  - storage/storageclass.yaml
+  - workloads/service.yaml
+  - workloads/statefulset.yaml
+  - workloads/ingressroute.yaml
+configMapGenerator:
+  - name: hermes-agent-bedrock-bridge
+    namespace: devops-agent
+    files:
+      - bedrock_claude_bridge.py=bridge/bedrock_claude_bridge.py
+      - requirements.txt=bridge/requirements.txt
+  - name: hermes-agent-github-cli
+    namespace: devops-agent
+    files:
+      - gh=github-cli/gh
+  - name: hermes-agent-runtime-identity
+    namespace: devops-agent
+    files:
+      - SOUL.md=identity/SOUL.md
+  - name: hermes-agent-declarative-skills
+    namespace: devops-agent
+    files:
+      - lead-devops-sre.SKILL.md=skills/lead-devops-sre/SKILL.md
+      - sre-pod-remediation.SKILL.md=skills/sre-pod-remediation/SKILL.md
+generatorOptions:
+  disableNameSuffixHash: true
+  labels:
+    app.kubernetes.io/name: hermes-agent
+    app.kubernetes.io/component: bedrock-bridge
+    app.kubernetes.io/part-of: devops-agent
