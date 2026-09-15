@@ -188,11 +188,15 @@ pi --session 01a0a326           # resume it later, partial id is fine
 ### Listing and deleting — `tools/`
 
 pi has no non-interactive list and no delete command at all (`pi --resume` is a picker, `pi list` is for *extensions*), so this
-folder ships two small helpers. Put them on your `PATH` once:
+folder ships two small helpers. **`./install.sh` puts both in `~/.local/bin`** (override with `PI_CLI_BIN_DIR`; a copy of your own
+already on `PATH` is left untouched), so on an installed machine they just work. If you skipped the installer, or that directory is
+not on your `PATH`:
 
 ```bash
 cp tools/pi-sessions tools/pi-session-rm ~/.local/bin/ && chmod +x ~/.local/bin/pi-session*
 ```
+
+`command not found` right after installing them means your shell cached the earlier lookup — `hash -r`, or open a new tab.
 
 **`pi-sessions`** — every session with its id, name, size and project, newest first:
 

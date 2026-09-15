@@ -3,9 +3,10 @@
 #
 #   1. checks python3 / node / pi / claude (installs pi if missing; claude must already be logged in)
 #   2. registers the pi-cli Claude Code bridge (:18187) as an auto-start user service
-#   3. registers the provider extension in ~/.pi/agent/settings.json and makes
+#   3. installs tools/pi-sessions + tools/pi-session-rm into ~/.local/bin
+#   4. registers the provider extension in ~/.pi/agent/settings.json and makes
 #      claude-code / claude-opus-5 pi's default provider + model (backup written first)
-#   4. runs a headless smoke test (a pi bash call + a connector call)
+#   5. runs a headless smoke test (a pi bash call + a connector call)
 #
 #   ./install.sh | ./install.sh --no-default (steps 1-2 + 4 only; use ./run.sh pi) | ./install.sh --uninstall
 set -euo pipefail
@@ -14,6 +15,7 @@ HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 MODEL="${PI_CLI_MODEL:-claude-opus-5}"
 SETTINGS="$HOME/.pi/agent/settings.json"
 EXT="$HERE/extensions/claude-code"
+BIN_DIR="${PI_CLI_BIN_DIR:-$HOME/.local/bin}"
 
 info() { printf '\033[36m[install]\033[0m %s\n' "$*"; }
 ok()   { printf '\033[32m[ok]\033[0m      %s\n' "$*"; }
@@ -22,6 +24,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 if [ "${1:-}" = "--uninstall" ]; then
   "$HERE/run.sh" uninstall-service
+  for t in pi-sessions pi-session-rm; do
+    [ -f "$BIN_DIR/$t" ] && cmp -s "$HERE/tools/$t" "$BIN_DIR/$t" && rm -f "$BIN_DIR/$t" && ok "removed $BIN_DIR/$t"
+  done
   if [ -f "$SETTINGS" ] && have jq; then
     tmp="$(mktemp)"; jq --arg e "$EXT" '(.extensions // []) |= map(select(. != $e)) | if .defaultProvider == "claude-code" then del(.defaultProvider, .defaultModel) else . end | if .enabledModels then .enabledModels |= map(select(startswith("claude-code/") | not)) else . end' "$SETTINGS" > "$tmp" && mv "$tmp" "$SETTINGS"
     ok "removed the extension and defaults from $SETTINGS"
@@ -43,6 +48,23 @@ ok "Claude Code login works"
 
 info "registering the pi-cli Claude Code bridge service (:${UPSTREAM_PORT:-18187})…"
 "$HERE/run.sh" install-service
+
+# pi has no non-interactive session list or delete of its own — these two fill that in.
+# Skipped only if the user has their own copies (different content) already on PATH.
+info "installing the session tools into $BIN_DIR…"
+mkdir -p "$BIN_DIR"
+for t in pi-sessions pi-session-rm; do
+  if have "$t" && ! cmp -s "$HERE/tools/$t" "$(command -v "$t")"; then
+    info "$t already on PATH at $(command -v "$t") and differs — leaving it alone"
+  else
+    install -m 755 "$HERE/tools/$t" "$BIN_DIR/$t"
+  fi
+done
+case ":$PATH:" in
+  *":$BIN_DIR:"*) ok "pi-sessions / pi-session-rm installed in $BIN_DIR" ;;
+  *) ok "pi-sessions / pi-session-rm installed in $BIN_DIR"
+     info "note: $BIN_DIR is not on your PATH — add it in ~/.zshrc: export PATH=\"$BIN_DIR:\$PATH\"" ;;
+esac
 
 if [ "$NO_DEFAULT" -eq 0 ]; then
   have jq || die "jq is required to edit $SETTINGS (brew install jq), or re-run with --no-default"
