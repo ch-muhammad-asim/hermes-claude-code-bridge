@@ -50,6 +50,11 @@ spec:
           configMap:
             name: hermes-agent-claude-code
             defaultMode: 0755
+        # Read-only Prometheus/Alertmanager stdio MCP; mounted into hermes and hermes-executor.
+        - name: prom-mcp
+          configMap:
+            name: hermes-agent-prom-mcp
+            defaultMode: 0755
         - name: claude-cli
           emptyDir: {}
         - name: claude-tmp
@@ -258,9 +263,9 @@ spec:
                 /opt/data \
                 /opt/data/image_cache \
                 /opt/data/skills \
-                /opt/data/memory \
+                /opt/data/memories \
                 /opt/data/.hermes/memory
-              chmod 0770 /opt/data/image_cache /opt/data/skills /opt/data/memory /opt/data/.hermes/memory
+              chmod 0770 /opt/data/image_cache /opt/data/skills /opt/data/memories /opt/data/.hermes/memory
               cp /runtime-identity/SOUL.md /opt/data/SOUL.md
               mkdir -p /opt/data/skills/lead-devops-sre
               if [ ! -f /opt/data/skills/lead-devops-sre/SKILL.md ]; then
@@ -385,6 +390,29 @@ spec:
                           ],
                       },
                   },
+                  # In-cluster metrics and alerts without a cloud round trip. Stdio MCP, GET only,
+                  # bounded output. Point the URLs at your Prometheus / Alertmanager services.
+                  "prometheus-readonly": {
+                      "command": "/opt/hermes/.venv/bin/python",
+                      "args": ["/prom-mcp/prom_readonly_mcp.py"],
+                      "env": {
+                          "PROMETHEUS_URL": "http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090",
+                          "ALERTMANAGER_URL": "http://prometheus-kube-prometheus-alertmanager.monitoring.svc:9093",
+                      },
+                      "timeout": 60,
+                      # Stdio servers can take >30 s to start on a CPU-contended node; a shorter
+                      # connect_timeout loses that race and the executor never becomes Ready.
+                      "connect_timeout": 60,
+                      "tools": {
+                          "include": [
+                              "prom_query",
+                              "prom_query_range",
+                              "prom_alerts",
+                              "prom_targets_down",
+                              "alertmanager_alerts",
+                          ],
+                      },
+                  },
                   "playwright-browser": {
                       "url": "http://localhost:8931/mcp",
                       "timeout": 120,
@@ -440,11 +468,27 @@ spec:
               _agent["clarify_timeout"] = 3600
               data.setdefault("approvals", {})["timeout"] = 300
               data["approvals"]["single_query_mode"] = "deny"
+              # approvals.deny globs block before any other guard and cannot be approved or forced.
               _deny = list(data["approvals"].get("deny") or [])
               for _glob in ("gcloud*", "*gcloud*", "*gsutil*", "*bq query*", "*bq ls*", "*bq show*"):
                   if _glob not in _deny:
                       _deny.append(_glob)
+              # Destructive cluster verbs stay unreachable regardless of RBAC. `kubectl delete pod`
+              # in the agent's own namespace stays allowed (diagnostic pods). Globs are
+              # case-insensitive, so the all-namespaces flag needs its surrounding spaces: a bare
+              # "*-A*" would also match "-a" inside a namespace name.
+              for _glob in ("*kubectl delete namespace*", "*kubectl delete ns *", "*kubectl delete node*",
+                            "*kubectl drain*", "*kubectl cordon*", "*kubectl uncordon*", "*kubectl taint*",
+                            "*kubectl delete*--all *", "*kubectl delete*--all", "*kubectl delete* -A *",
+                            "*kubectl delete* -A", "*kubectl delete*--all-namespaces*",
+                            "*kubectl delete pvc*", "*kubectl delete pv *", "*kubectl delete persistentvolume*",
+                            "*helm install*", "*helm upgrade*", "*helm uninstall*", "*helm rollback*"):
+                  if _glob not in _deny:
+                      _deny.append(_glob)
               data["approvals"]["deny"] = _deny
+              # A previous run may have persisted per-command allow entries on the PVC; every
+              # flagged command must go through the approval prompt again after a restart.
+              data["command_allowlist"] = []
               sess = data.setdefault("sessions", {})
               sess["auto_prune"] = True
               sess["retention_days"] = 90
@@ -452,7 +496,16 @@ spec:
               kanban["dispatch_in_gateway"] = False
               kanban["auto_decompose"] = False
               kanban["review_dispatch"] = False
-              data.setdefault("curator", {})["enabled"] = False   # deterministic-only pass + weekly tarballs; nothing to curate
+              # Self-improvement. Memory is curated by the aux model (Sonnet via the bridge) so
+              # entries stay useful; consolidation and built-in skill pruning stay off so nothing
+              # the operator wrote is rewritten or removed without a human.
+              _cur = data.setdefault("curator", {})
+              _cur["enabled"] = True
+              _cur["consolidate"] = False
+              _cur["prune_builtins"] = False
+              _mem = data.setdefault("memory", {})
+              _mem["memory_char_limit"] = 6000
+              _mem["user_char_limit"] = 3000
               for _dead in ("x_search", "updates", "human_delay", "prompt_caching"):
                   data.pop(_dead, None)
               data.setdefault("model_overrides", {}).setdefault("vertex-claude-bridge", {})["claude-opus-5"] = {
@@ -493,7 +546,9 @@ spec:
                             "kanban_decomposer", "review", "title_generation"):
                   aux.setdefault(_task, {}).update(_bridge)
               aux.setdefault("title_generation", {})["enabled"] = False
-              aux.setdefault("background_review", {})["enabled"] = False
+              # Background skill review: after enough turns Hermes forks a review pass (on the aux
+              # model above) that turns repeated procedures into skills and refreshes stale ones.
+              aux.setdefault("background_review", {})["enabled"] = True
               aux.setdefault("compression", {})["timeout"] = 360
               aux.pop("web_extract", None)
               _bridge_opus = dict(_bridge, model="claude-opus-5")
@@ -563,8 +618,6 @@ spec:
               value: /opt/data
             - name: HERMES_SKILLS_DIR
               value: /opt/data/skills
-            - name: HERMES_MEMORY_DIR
-              value: /opt/data/memory
             - name: PATH
               value: /opt/data/pg/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: LD_LIBRARY_PATH
@@ -596,6 +649,10 @@ spec:
             - name: agent-state
               mountPath: /opt/data
               subPath: hermes-data
+            - name: prom-mcp
+              mountPath: /prom-mcp/prom_readonly_mcp.py
+              subPath: prom_readonly_mcp.py
+              readOnly: true
           readinessProbe:
             httpGet:
               path: /health
@@ -766,6 +823,14 @@ spec:
               value: "1500"
             - name: NATIVE_TASK_BUDGET_USD
               value: "8"
+            # Bounded pool of concurrent native tasks (one per conversation); a request whose
+            # client disconnects is cancelled and its slot released.
+            - name: NATIVE_CONCURRENCY
+              value: "3"
+            # "1": a command the executor parked for approval is returned to Hermes as a real
+            # terminal tool call, so the gateway shows its own Allow / Deny prompt.
+            - name: NATIVE_APPROVAL_RELAY
+              value: "1"
           ports:
             - name: native
               containerPort: 18184
@@ -839,8 +904,6 @@ spec:
               value: /opt/data
             - name: HERMES_SKILLS_DIR
               value: /opt/data/skills
-            - name: HERMES_MEMORY_DIR
-              value: /opt/data/memory
             - name: PATH
               value: /opt/data/pg/bin:/opt/data/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
             - name: LD_LIBRARY_PATH
@@ -853,6 +916,12 @@ spec:
               value: "19193"
             - name: EXECUTOR_CONCURRENCY
               value: "4"
+            # Must match NATIVE_APPROVAL_RELAY on claude-code: "relay" (gateway Allow / Deny
+            # prompt) or "typed" (`approve <id>` reply).
+            - name: EXECUTOR_APPROVAL_UX
+              value: relay
+            - name: NATIVE_PROVIDER_URL
+              value: http://127.0.0.1:18184
             - name: GCP_PROJECT_ALLOWED
               value: your-gcp-project-id
           envFrom:
@@ -867,6 +936,10 @@ spec:
             - name: agent-state
               mountPath: /opt/data
               subPath: hermes-data
+            - name: prom-mcp
+              mountPath: /prom-mcp/prom_readonly_mcp.py
+              subPath: prom_readonly_mcp.py
+              readOnly: true
           readinessProbe:
             exec:
               command:

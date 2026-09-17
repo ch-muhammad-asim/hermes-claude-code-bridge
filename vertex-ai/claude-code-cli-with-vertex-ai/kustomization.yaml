@@ -10,6 +10,9 @@ configMapGenerator:
   - name: hermes-agent-gcp-mcp-auth-bridge
     files:
       - gcp_mcp_auth_bridge.py=development/deploy/gcp-mcp/gcp_mcp_auth_bridge.py
+  - name: hermes-agent-prom-mcp
+    files:
+      - prom_readonly_mcp.py=development/deploy/prom-mcp/prom_readonly_mcp.py
   - name: hermes-agent-claude-code
     files:
       - development/src/native_provider.py

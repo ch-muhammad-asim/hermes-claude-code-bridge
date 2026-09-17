@@ -30,6 +30,22 @@ See the [development notes](development/README.md) for the architecture and
 limitations of the deployment example. These files are examples, not a record
 of a live deployment. Render the development example locally with `kubectl kustomize .`.
 
+## 🔐 Guardrails and operations
+
+- **Human approval for flagged commands.** Hermes' own approval engine decides;
+  the example relays parked commands as tool calls so the gateway shows its
+  native Allow / Deny prompt. A typed `approve <id>` fallback remains available.
+- **Unbypassable deny list.** Destructive cluster verbs (`kubectl drain`,
+  namespace/PV/PVC deletes, `--all`/`-A` deletes, `helm install/upgrade/uninstall`)
+  and all `gcloud`/`gsutil`/`bq` calls are denied before any guard.
+- **Bounded concurrency.** A pool of native tasks, one per conversation, with
+  cancellation when the requester disconnects.
+- **Read-only diagnostics.** In-cluster Prometheus and Alertmanager through a
+  stdio MCP, plus GCP logging, monitoring and trace through the auth bridge.
+- **Self-improvement on the auxiliary model.** Background skill review and memory
+  curation run on Sonnet through the Vertex bridge; consolidation and built-in
+  pruning stay off.
+
 ## ✅ Local checks
 
 The unit tests need `jsonschema` in the active Python environment:

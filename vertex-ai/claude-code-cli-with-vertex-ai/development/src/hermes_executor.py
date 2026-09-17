@@ -1,15 +1,17 @@
 """Hermes tool executor for the Claude Code reasoning loop (development hermes-agent).
 
-Exposes exactly three MCP tools to the native Claude Code process:
+Exposes exactly four MCP tools to the native Claude Code process:
   hermes_search_tools  - find Hermes tools and their real JSON schemas
   hermes_call_tool     - execute one Hermes tool through Hermes' own dispatch path
   hermes_context       - read the agent's persistent memory and MCP connection status
+  hermes_runtime       - read-only runtime facts (CLI version, model, limits, recent task stats)
 
 Parity, not a subset: the tool grant is computed by Hermes itself from config.yaml
 (`toolsets` + `mcp-<server>` for every configured MCP, minus `agent.disabled_toolsets`, check_fn
-honoured), so Claude Code can do exactly what the gateway's own loop could do - browser interaction, `terminal` with kubectl/gh/psql - and nothing more. Every call goes
-through `model_tools.handle_function_call`, which fires the configured pre_tool_call shell hooks
-(block-installs) and the terminal tool's own tirith/dangerous-command guards. The
+honoured), so Claude Code can do exactly what the gateway's own loop could do - configured MCP
+integrations, browser interaction, `terminal` with kubectl/gh/psql - and nothing more. Every call
+goes through `model_tools.handle_function_call`, which fires the configured pre_tool_call shell
+hooks (for example an install blocker) and the terminal tool's own dangerous-command guards. The
 container runs with HERMES_SINGLE_QUERY_SESSION=1 and approvals.single_query_mode "deny", so
 Hermes itself never auto-approves a flagged command here (without that marker a callback-less
 context is treated as allow).
@@ -26,7 +28,8 @@ separate process, so this is its equivalent with the human decision authenticate
   1. A dangerous-but-not-hardline command comes back from Hermes as `blocked`; the executor parks it
      as a pending approval (id, exact-arguments hash, conversation fingerprint, 15 min TTL) and
      returns `status: pending_approval` with the sentence the model must relay.
-  2. The user answers in the same conversation: `approve <id>` or `deny <id>`.
+  2. The user answers in the same conversation: `approve <id>` or `deny <id>` (typed mode), or
+     clicks Allow / Deny on the gateway's own prompt (relay mode, see EXECUTOR_APPROVAL_UX).
   3. native_provider.py reads that latest USER message and calls POST /approvals/resolve here with
      the bearer secret and the same conversation fingerprint.
   4. Claude Code re-issues the identical command; the executor finds the approved entry for this
@@ -49,7 +52,17 @@ import time
 from pathlib import Path
 
 HOME = Path(os.environ['HERMES_HOME'])
-MEMORY_DIR = Path(os.environ.get('HERMES_MEMORY_DIR', str(HOME / 'memory')))
+
+
+def memory_dir():
+    """Hermes' own memories directory (HERMES_HOME/memories). Resolved through Hermes at call time:
+    a hard-coded path drifts (memory vs memories) and hermes_context then silently returns empty
+    memory while the memory tool keeps writing elsewhere."""
+    try:
+        from tools.memory_tool import get_memory_dir
+        return Path(get_memory_dir())
+    except Exception:
+        return HOME / 'memories'
 MAX_RESULT = int(os.environ.get('EXECUTOR_MAX_RESULT_CHARS', '30000'))
 MAX_ARGS = 60000
 PORT = int(os.environ.get('EXECUTOR_PORT', '19193'))
@@ -61,8 +74,12 @@ LOOP_ONLY = {'clarify'}
 WAIT_PORTS = tuple(int(p) for p in os.environ.get('EXECUTOR_WAIT_PORTS', '19190,8931').split(',') if p.strip())
 APPROVALS_FILE = HOME / 'executor-approvals.json'
 APPROVAL_TTL = int(os.environ.get('EXECUTOR_APPROVAL_TTL_SECONDS', '900'))
+# 'typed': the user replies `approve <id>` in the conversation. 'relay': the provider returns the
+# parked command to Hermes as a tool call and Hermes' gateway approval prompt (Allow / Deny) decides.
+APPROVAL_UX = os.environ.get('EXECUTOR_APPROVAL_UX', 'typed')
 # Hermes' own wording for "flagged, and this context cannot ask" - the only block we convert.
 PENDING_MARKERS = ('single-query mode', 'single_query_mode')
+PROVIDER_URL = os.environ.get('NATIVE_PROVIDER_URL', 'http://127.0.0.1:18184')
 CONVERSATION_HEADER = 'x-hermes-conversation'
 CONVERSATION_RE = re.compile(r'^[0-9a-f]{16}$')
 UNBOUND = 'unbound'
@@ -120,6 +137,7 @@ class Approvals:
             data = self._load()
             request_id = secrets.token_hex(4)
             data[request_id] = {'tool': tool, 'command': str(arguments.get('command', ''))[:2000],
+                                'arguments': arguments,  # relayed verbatim to Hermes' own approval prompt
                                 'args_sha256': args_digest(arguments), 'reason': reason,
                                 'conversation': conversation, 'status': 'pending', 'created': time.time()}
             self._save(data)
@@ -135,7 +153,7 @@ class Approvals:
                 return {'request_id': request_id, 'error': 'approval belongs to a different conversation'}
             if entry['status'] != 'pending':
                 return {'request_id': request_id, 'error': f"already {entry['status']}"}
-            entry['status'] = 'approved' if decision == 'approve' else 'denied'
+            entry['status'] = {'approve': 'approved', 'deny': 'denied'}.get(decision, 'superseded')
             entry['resolved'] = time.time()
             self._save(data)
             return {'request_id': request_id, 'status': entry['status'], 'command': entry['command']}
@@ -154,10 +172,13 @@ class Approvals:
                     return dict(entry, request_id=request_id)
         return None
 
-    def pending(self, conversation):
+    def pending(self, conversation, since=0.0):
         with self.lock:
-            return {k: {'command': v['command'], 'reason': v['reason']} for k, v in self._load().items()
-                    if v['status'] == 'pending' and v.get('conversation') == conversation}
+            return {k: {'command': v['command'], 'reason': v['reason'], 'created': v.get('created', 0),
+                        'arguments': v.get('arguments') or {'command': v['command']}}
+                    for k, v in self._load().items()
+                    if v['status'] == 'pending' and v.get('conversation') == conversation
+                    and v.get('created', 0) >= since}
 
 
 class BearerAuth:
@@ -181,6 +202,17 @@ class BearerAuth:
         headers = dict(scope.get('headers', []))
         if not hmac.compare_digest(headers.get(b'authorization', b''), ('Bearer ' + self.token).encode()):
             return await self._json(send, 401, {'error': 'Unauthorized'})
+        if scope.get('path', '') == '/approvals/pending' and scope.get('method') == 'GET':
+            from urllib.parse import parse_qs
+            query = parse_qs(scope.get('query_string', b'').decode())
+            conversation = (query.get('conversation') or [''])[0]
+            if not CONVERSATION_RE.match(conversation):
+                return await self._json(send, 400, {'error': 'conversation (16 hex) required'})
+            try:
+                since = float((query.get('since') or ['0'])[0])
+            except ValueError:
+                since = 0.0
+            return await self._json(send, 200, {'pending': self.approvals.pending(conversation, since)})
         if scope.get('path', '') == '/approvals/resolve' and scope.get('method') == 'POST':
             body = b''
             while True:
@@ -192,11 +224,11 @@ class BearerAuth:
                 request = json.loads(body or b'{}')
                 request_id, decision = str(request['request_id']), str(request['decision'])
                 conversation = str(request['conversation'])
-                if (decision not in ('approve', 'deny') or not re.fullmatch(r'[0-9a-f]{8}', request_id)
+                if (decision not in ('approve', 'deny', 'superseded') or not re.fullmatch(r'[0-9a-f]{8}', request_id)
                         or not CONVERSATION_RE.match(conversation)):
                     raise ValueError
             except (ValueError, KeyError, TypeError):
-                return await self._json(send, 400, {'error': 'request_id (8 hex), decision approve|deny and conversation (16 hex) required'})
+                return await self._json(send, 400, {'error': 'request_id (8 hex), decision approve|deny|superseded and conversation (16 hex) required'})
             result = self.approvals.resolve(request_id, decision, conversation)
             print(json.dumps({'event': 'approval_resolved', 'conversation': conversation, **result}), flush=True)
             return await self._json(send, 200 if 'error' not in result else 409, result)
@@ -318,13 +350,22 @@ class Executor:
         print(json.dumps({'event': 'approval_requested', 'request_id': request_id,
                           'conversation': conversation, 'reason': reason}), flush=True)
         command = str(arguments.get('command', ''))
+        if APPROVAL_UX == 'relay':
+            # The provider hands the parked command back to Hermes as a terminal tool call; Hermes'
+            # own approval engine then posts its Allow / Deny prompt and runs it after the click.
+            instruction = (f'This command needs human approval ({reason[:120]}) and was NOT run. Stop working '
+                           f'on this step now and end your turn with one short line telling the user that '
+                           f'`{command[:120]}` is waiting for their approval and an Allow / Deny prompt follows '
+                           f'in this thread. Do not include any approve/deny instructions or ids, and do not '
+                           f'retry, rephrase or work around the command.')
+        else:
+            instruction = (f'This command needs human approval ({reason[:120]}). Stop and tell the '
+                           f'user verbatim: "Reply `approve {request_id}` to run `{command[:120]}`, '
+                           f'or `deny {request_id}`." Do not retry, rephrase or work around it. '
+                           f'The approval is single-use, valid only in this thread, and expires in '
+                           f'{APPROVAL_TTL // 60} minutes.')
         return {'status': 'pending_approval', 'request_id': request_id, 'reason': reason,
-                'command': command[:500],
-                'instruction': (f'This command needs human approval ({reason[:120]}). Stop and tell the '
-                                f'user verbatim: "Reply `approve {request_id}` to run `{command[:120]}`, '
-                                f'or `deny {request_id}`." Do not retry, rephrase or work around it. '
-                                f'The approval is single-use, valid only in this thread, and expires in '
-                                f'{APPROVAL_TTL // 60} minutes.')}
+                'command': command[:500], 'instruction': instruction}
 
     def _run_approved_terminal(self, arguments, approved, task_id):
         """Human-approved re-run: hooks still fire; only the dangerous-command gate is skipped."""
@@ -377,11 +418,51 @@ def main():
         return executor.call(name, arguments, conversation_from(ctx))
 
     @mcp.tool()
+    def hermes_runtime() -> dict:
+        """Introspect this agent's own runtime: Claude Code CLI version, Hermes version, model/provider
+        settings, compaction, MCP connection status, tool grant size, and recent native-task timings and
+        estimated cost (last 24h and recent tasks). Read-only; no secrets are returned."""
+        from urllib.request import Request, urlopen
+        headers = {'Authorization': 'Bearer ' + os.environ['VERTEX_CLAUDE_BRIDGE_API_KEY']}
+        provider, stats = {}, {}
+        for path, target in (('/health', 'provider'), ('/stats', 'stats')):
+            try:
+                with urlopen(Request(PROVIDER_URL + path, headers=headers), timeout=5) as response:
+                    payload = json.loads(response.read())
+            except Exception as exc:
+                payload = {'error': f'{type(exc).__name__}: {str(exc)[:120]}'}
+            if target == 'provider':
+                provider = payload
+            else:
+                stats = payload
+        try:
+            from importlib.metadata import version as _pkg_version
+            hermes_version = _pkg_version('hermes-agent')
+        except Exception:
+            hermes_version = 'unknown'
+        model = config.get('model') or {}
+        agent_cfg = config.get('agent') or {}
+        approvals_cfg = config.get('approvals') or {}
+        return {
+            'claude_code': provider,
+            'hermes': {'version': hermes_version, 'home': str(HOME),
+                       'provider': model.get('provider'), 'model': model.get('default'),
+                       'context_length': model.get('context_length'),
+                       'compression_threshold': (config.get('compression') or {}).get('threshold'),
+                       'max_turns': agent_cfg.get('max_turns'), 'toolsets': config.get('toolsets'),
+                       'disabled_toolsets': agent_cfg.get('disabled_toolsets'),
+                       'approvals': {k: approvals_cfg.get(k) for k in ('mode', 'single_query_mode', 'deny')}},
+            'integrations': get_mcp_status(),
+            'tool_grant': {'count': len(executor.schemas), 'mcp_tools': sum(1 for n in executor.schemas if n.startswith('mcp__'))},
+            'usage': stats,
+        }
+
+    @mcp.tool()
     def hermes_context(ctx: Context) -> dict:
         """Read the agent's persistent memory files, integration status and this thread's pending approvals."""
         memories = {}
         for name in ('MEMORY.md', 'USER.md'):
-            p = MEMORY_DIR / name
+            p = memory_dir() / name
             memories[name] = p.read_text()[:6000] if p.exists() else ''
         conversation = conversation_from(ctx)
         return {'memory': memories, 'integrations': get_mcp_status(),

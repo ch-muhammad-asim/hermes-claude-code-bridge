@@ -1,0 +1,30 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local secrets and environment files (never commit)
+.env
+.env.*
+!.env.example
+!env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*service-account*.json
+kubeconfig*
+
+# Runtime state and logs
+state/
+work/
+*.log
