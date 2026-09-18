@@ -303,23 +303,50 @@ audit trail is still `~/.pi-bridge-audit.jsonl`.
 | `address already in use` | a foreground copy is running — `./run-bridge.sh install-service` clears it |
 | `pi: command not found` in the unit | re-run `./run-bridge.sh install-service` (it re-bakes the absolute `PATH`) |
 | `.env` change had no effect | re-run `./run-bridge.sh install-service` |
+| Edited `run-bridge.sh` / `pi-cli/run.sh` but behaviour is unchanged | that unit is still running the old code — `./run-bridge.sh restart` (or `pi-cli/run.sh restart`). Each backend restarts only **its own** units, so an edit touching both trees needs both restarted |
 | Claude answers "authenticate" | `claude login`, then `./run-bridge.sh restart` |
 | Broken symlink errors | clone the repo with git (symlinks), not as a zip |
 | `pi` says "No models available" | run `claude-code/pi-cli/install.sh` — see [Terminal `pi`](#️-terminal-pi--fixing-no-models-available). Do **not** use pi's `/login` |
 | `pi` works but bills as "extra usage" | the built-in `anthropic` provider is back — re-run the pi-cli installer, or unset `PI_CLI_KEEP_ANTHROPIC` |
 
-### Known issue: OpenCode free models return empty replies
+### Known issue: OpenCode free tier cannot run tool turns
 
-On this box the `opencode` CLI itself returns **no output** for the free models —
-`opencode run --model opencode/big-pickle 'Reply with exactly: pong'` prints nothing, with or without
-`pure-llm.json`. Everything downstream is therefore empty: the upstream bridge streams the frames
-(`chars=7427`) but reports `out_tokens=0`, pi ends the turn with an empty assistant message, and the
-endpoint answers `content: ""`.
+Two separate faults were found here, one fixed and one structural.
 
-This is upstream of this port — the same `opencode_bridge.py` and the same pi extension are shared
-with `../macos/`, byte for byte, through the symlinks. The `opencode/` **services, ports, health,
-model discovery and reboot persistence all work**; only the generated text is empty. Start at
-`opencode auth login` / the OpenCode account's free-tier status, not at the bridges.
+**Fixed — silent empty replies.** The `opencode` CLI was on 1.14.48, whose session DB had
+`session_message.seq` as `NOT NULL` with no default; every message insert failed with
+`SQLiteError: NOT NULL constraint failed`, so runs produced nothing at all. Upgrading the CLI
+(now 1.18.31) fixed it: `curl -fsSL https://opencode.ai/install | bash`.
 
-The `claude-code/` backend is unaffected and was verified end to end (everyday call ran, `rm -rf` was
-held for approval).
+**Structural — the free tier forbids disabling tools.** `opencode/pure-llm.json` used to set every
+tool permission to `deny`, so OpenCode ran no tools and pi did them under the guardrails. The free
+tier now rejects that outright:
+
+```
+FreeTierError: Error from provider (Console): OpenCode's free tier can only be used from within OpenCode
+```
+
+Denying **any single** permission triggers it (`{"permission":{"bash":"deny"}}` is enough), and the
+separate `tools` key (`{"tools":{"*":false}}`) triggers it too — there is no mechanism left to turn
+OpenCode's own tools off on the free tier. `allow` and `ask` are both accepted, and the two
+non-model guards `external_directory` / `doom_loop` may stay `deny` because the free tier does not
+count them as tools.
+
+`pure-llm.json` is therefore now an **allow** config (bash and websearch included). The consequence:
+
+| Through `:18484` | Result |
+|---|---|
+| Plain chat | ✅ works |
+| Any turn where pi offers its tools | ❌ `[400] tool_calls[0].id must be a non-empty string` |
+
+With OpenCode's agent forced on, pi's tool-emulation prompt makes OpenCode emit a tool call it
+serializes with an empty id, which OpenCode Zen rejects. The same prompt sent straight to
+`opencode run` works, so this is the two agents colliding, not a model fault.
+
+**Options:** use this backend for plain chat only; use the `claude-code/` backend for tool work (it
+is unaffected and verified end to end); or point the backend at a **paid, API-key** OpenCode provider
+rather than the free tier, which allows `deny` again and restores the original pure-LLM design.
+
+Despite the name, `pure-llm.json` no longer denies anything — the filename is kept because both
+trees' `run-bridge.sh` reference it as `PURE_LLM_CONFIG`.
+
