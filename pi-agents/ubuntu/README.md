@@ -176,6 +176,26 @@ Two details worth knowing:
 ./install.sh --uninstall     # removes the service, the tools and the settings entries
 ```
 
+## 🖼️ Images (vision)
+
+Pasted or attached images reach the model on both the Hermes endpoints and terminal `pi`.
+
+pi's provider sends them as OpenAI `image_url` parts (base64 data URIs); `claude_native_bridge.py`
+converts those to Anthropic image blocks and writes them alongside the text on the
+`claude -p --input-format stream-json` channel. Before this the bridge kept only `type: "text"`
+parts, so images were dropped silently and the model answered *"I don't receive any visual content
+from that file"* — the read succeeded, nothing rendered.
+
+```bash
+pi -p 'what is in this image?' @/path/to/shot.png     # terminal pi
+```
+
+Data URIs, `file://` URLs and plain local paths are all accepted. Caps:
+`CLAUDE_NATIVE_MAX_IMAGES` (default 8 per turn, `0` disables vision) and
+`CLAUDE_NATIVE_MAX_IMAGE_BYTES` (default 16 MiB each); oversized or unreadable images are skipped
+rather than failing the turn. The fix lives in the shared bridge, so **macOS and Ubuntu both get it**
+— `ubuntu/claude-code/native` is a symlink to the same file (same inode).
+
 ## 📦 What is actually in `common/`
 
 Only three files in `common/` are Ubuntu-specific (plus each backend's `run-bridge.sh` / `install.sh`). Everything else is a **symlink into `../macos/`**, so the bridge,

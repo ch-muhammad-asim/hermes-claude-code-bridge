@@ -29,6 +29,7 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
@@ -99,6 +100,58 @@ def _split_csv(v: str) -> list[str]:
     return [p.strip() for p in (v or "").split(",") if p.strip()]
 
 
+# ── images ────────────────────────────────────────────────────────────────────
+# pi's provider sends pasted/attached images as OpenAI `image_url` parts (base64 data URIs);
+# `claude -p --input-format stream-json` accepts Anthropic image blocks. Without this the parts
+# were silently dropped and the model saw text only ("I don't receive any visual content").
+_IMAGE_MEDIA = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "gif": "image/gif", "webp": "image/webp"}
+MAX_IMAGES = int(os.environ.get("CLAUDE_NATIVE_MAX_IMAGES", "8"))
+MAX_IMAGE_BYTES = int(os.environ.get("CLAUDE_NATIVE_MAX_IMAGE_BYTES", str(16 * 1024 * 1024)))
+
+
+def _image_block(url: Any) -> Optional[dict[str, Any]]:
+    """OpenAI image_url (data: URI, file:// URL, or a local path) → an Anthropic image block."""
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith("data:"):
+        head, _, b64 = url.partition(",")
+        if not b64 or ";base64" not in head:
+            return None
+        media, data = (head[5:].split(";")[0] or "image/png"), b64
+    else:
+        path = url[7:] if url.startswith("file://") else url
+        if not os.path.isfile(path):
+            return None
+        try:
+            raw = open(path, "rb").read(MAX_IMAGE_BYTES + 1)
+        except OSError:
+            return None
+        if len(raw) > MAX_IMAGE_BYTES:
+            return None
+        media = _IMAGE_MEDIA.get(os.path.splitext(path)[1].lstrip(".").lower(), "image/png")
+        data = base64.b64encode(raw).decode()
+    if (len(data) * 3) // 4 > MAX_IMAGE_BYTES:
+        return None
+    return {"type": "image", "source": {"type": "base64", "media_type": media, "data": data}}
+
+
+def _images_of(content: Any) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for part in content:
+        if not (isinstance(part, dict) and part.get("type") == "image_url"):
+            continue
+        inner = part.get("image_url")
+        block = _image_block(inner.get("url") if isinstance(inner, dict) else inner)
+        if block:
+            out.append(block)
+        if len(out) >= MAX_IMAGES:
+            break
+    return out
+
+
 def _text_of(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -125,6 +178,9 @@ def normalize(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if role == "system":
             continue
         entry: dict[str, Any] = {"role": role, "text": _text_of(m.get("content")).strip()}
+        images = _images_of(m.get("content"))
+        if images:
+            entry["images"] = images
         if role == "assistant" and m.get("tool_calls"):
             entry["tool_calls"] = [{"id": tc.get("id"), "name": (tc.get("function") or {}).get("name"),
                                     "arguments": (tc.get("function") or {}).get("arguments")} for tc in m["tool_calls"]]
@@ -270,9 +326,11 @@ class Session:
                 self.events.put({"type": "_host_call", "mcp_id": str(msg.get("id")), "name": msg.get("name"),
                                  "arguments": msg.get("arguments") or {}})
 
-    def send_user(self, text: str) -> None:
+    def send_user(self, text: str, images: Optional[list[dict[str, Any]]] = None) -> None:
         assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": text}]}}) + "\n")
+        content: list[dict[str, Any]] = [{"type": "text", "text": text}]
+        content.extend(images or [])
+        self.proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": content}}) + "\n")
         self.proc.stdin.flush()
 
     def deliver_result(self, call_id: str, content: str, is_error: bool = False) -> bool:
@@ -586,7 +644,7 @@ class Handler(BaseHTTPRequestHandler):
                             print(f"[claude-native] warning: unknown tool_call_id {r.get('tool_call_id')}", flush=True)
                         session.history.append(r)
                 elif mode == "continue":
-                    session.send_user(norm[-1]["text"])
+                    session.send_user(norm[-1]["text"], norm[-1].get("images"))
                     session.history.append(norm[-1])
                 else:
                     seed = flatten_history(norm[:-1])
@@ -597,7 +655,7 @@ class Handler(BaseHTTPRequestHandler):
                         text = f"<conversation-history>\n{seed}\n</conversation-history>\n\nRespond only to this latest message:\n{latest['text']}"
                     else:
                         text = latest["text"]
-                    session.send_user(text)
+                    session.send_user(text, latest.get("images"))
                     session.history = list(norm)
                 print(f"[claude-native] session={session.id} mode={mode} model={model} effort={effort} tools={len(tools)}", flush=True)
                 if stream:
