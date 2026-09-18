@@ -68,10 +68,23 @@ upstream_require() {
 # allowlist is refused automatically ("requested permissions … not granted"). Override with
 # CLAUDE_CODE_MCP_ALLOW in .env (comma-separated tool names) or set PI_CLAUDE_CONNECTORS=0 for
 # the strict pure-LLM mode (`claude --tools ""`, no connectors at all).
-CLAUDE_BUILTINS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,WebFetch,WebSearch,Task,TodoWrite,TodoRead,AskUserQuestion,Skill,SlashCommand,KillShell,BashOutput,EnterPlanMode,ExitPlanMode,PowerShell,CronCreate,CronDelete,CronList,Monitor,RemoteTrigger,SendMessage,ListAgents,TaskOutput,TaskStop,EnterWorktree,ExitWorktree,PushNotification"
+CLAUDE_BUILTINS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,Task,TodoWrite,TodoRead,AskUserQuestion,Skill,SlashCommand,KillShell,BashOutput,EnterPlanMode,ExitPlanMode,PowerShell,CronCreate,CronDelete,CronList,Monitor,RemoteTrigger,SendMessage,ListAgents,TaskOutput,TaskStop,EnterWorktree,ExitWorktree,PushNotification"
 ATLASSIAN_READ="mcp__claude_ai_Atlassian__getAccessibleAtlassianResources,mcp__claude_ai_Atlassian__atlassianUserInfo,mcp__claude_ai_Atlassian__getJiraIssue,mcp__claude_ai_Atlassian__searchJiraIssuesUsingJql,mcp__claude_ai_Atlassian__getVisibleJiraProjects,mcp__claude_ai_Atlassian__getTransitionsForJiraIssue,mcp__claude_ai_Atlassian__lookupJiraAccountId,mcp__claude_ai_Atlassian__getJiraIssueRemoteIssueLinks,mcp__claude_ai_Atlassian__getJiraProjectIssueTypesMetadata,mcp__claude_ai_Atlassian__getJiraIssueTypeMetaWithFields,mcp__claude_ai_Atlassian__getIssueLinkTypes,mcp__claude_ai_Atlassian__getConfluenceSpaces,mcp__claude_ai_Atlassian__getConfluencePage,mcp__claude_ai_Atlassian__getPagesInConfluenceSpace,mcp__claude_ai_Atlassian__getConfluencePageDescendants,mcp__claude_ai_Atlassian__getConfluencePageFooterComments,mcp__claude_ai_Atlassian__getConfluencePageInlineComments,mcp__claude_ai_Atlassian__searchConfluenceUsingCql,mcp__claude_ai_Atlassian__search,mcp__claude_ai_Atlassian__fetch"
 NATIVE_BRIDGE="$BACKEND_DIR/native/claude_native_bridge.py"
 export PI_UPSTREAM_NATIVE_TOOLS="${PI_UPSTREAM_NATIVE_TOOLS:-$([ "${PI_CLAUDE_NATIVE:-1}" = "0" ] && echo 0 || echo 1)}"
+# Claude's own web tools. pi ships none, so these are the agent's only internet access; they are
+# allowlisted rather than merely un-denied because this path runs `--permission-mode default`,
+# where anything outside CLAUDE_CODE_ALLOWED_TOOLS is refused. PI_CLAUDE_WEB=0 takes them away.
+WEB_TOOLS="WebSearch,WebFetch"
+claude_allow() {
+  local allow="${CLAUDE_CODE_MCP_ALLOW:-$ATLASSIAN_READ}"
+  # '*' is the bypassPermissions marker the bridge checks for — never append to it.
+  if [ "${PI_CLAUDE_WEB:-1}" = "0" ] || [ "$allow" = "*" ]; then printf '%s' "$allow"; else printf '%s,%s' "$allow" "$WEB_TOOLS"; fi
+}
+claude_deny() {
+  if [ "${PI_CLAUDE_WEB:-1}" = "0" ]; then printf '%s,%s' "$CLAUDE_BUILTINS" "$WEB_TOOLS"; else printf '%s' "$CLAUDE_BUILTINS"; fi
+}
+
 upstream_run() {
   # Started from inside a Claude Code / Agent SDK session? Those variables make the spawned `claude`
   # look like a third-party app ("Third-party apps now draw from extra usage"). Drop them.
@@ -80,7 +93,7 @@ upstream_run() {
     # NATIVE (default): pi's tools reach Claude as real function calls via an MCP shim; one warm
     # claude process per conversation; connectors read-only (allowlist) unless CLAUDE_CODE_MCP_ALLOW='*'.
     BRIDGE_PORT="$UPSTREAM_PORT" CLAUDE_CODE_BRIDGE_MODEL="$MODEL" CLAUDE_CODE_EFFORT="${CLAUDE_CODE_EFFORT:-medium}" \
-    CLAUDE_CODE_ALLOWED_TOOLS="${CLAUDE_CODE_MCP_ALLOW:-$ATLASSIAN_READ}" CLAUDE_CODE_DISALLOWED_TOOLS="$CLAUDE_BUILTINS" \
+    CLAUDE_CODE_ALLOWED_TOOLS="$(claude_allow)" CLAUDE_CODE_DISALLOWED_TOOLS="$(claude_deny)" \
     CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
     CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
       exec python3 "$NATIVE_BRIDGE"
@@ -93,8 +106,8 @@ upstream_run() {
   fi
   BRIDGE_PORT="$UPSTREAM_PORT" CLAUDE_CODE_BRIDGE_MODEL="$MODEL" CLAUDE_CODE_EFFORT="${CLAUDE_CODE_EFFORT:-medium}" \
   CLAUDE_CODE_PERMISSION_MODE="default" \
-  CLAUDE_CODE_DISALLOWED_TOOLS="$CLAUDE_BUILTINS" \
-  CLAUDE_CODE_ALLOWED_TOOLS="${CLAUDE_CODE_MCP_ALLOW:-$ATLASSIAN_READ}" \
+  CLAUDE_CODE_DISALLOWED_TOOLS="$(claude_deny)" \
+  CLAUDE_CODE_ALLOWED_TOOLS="$(claude_allow)" \
   CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
   CLAUDE_CODE_BRIDGE_LABEL="$UPSTREAM_LABEL" CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
     exec "$CLAUDE_LEGACY_LAUNCHER" run

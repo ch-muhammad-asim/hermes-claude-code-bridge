@@ -10,14 +10,15 @@ Calendar, …) available natively.
  you ──▶ pi (its own tools, no guardrails, your cwd) ──/v1/chat/completions + tools──▶ Claude Code NATIVE bridge :18187
                                                                                           one warm `claude` per conversation
                                                                                           pi's tools = real functions (MCP shim)
-                                                                                          built-in tools OFF · ALL connectors ON
+                                                                                          built-in tools OFF (web on) · ALL connectors ON
 ```
 
 **Native means native:** pi's `bash`/`read`/`write`/`edit`/… are handed to Claude as real function definitions (through a tiny MCP
 server the bridge gives to `claude`), Claude's calls come back as standard `tool_calls`, pi executes them, and the *same* `claude`
 process continues — no text protocol, no per-turn process spawn.
 
-Local work is pi's; SaaS look-ups and actions are Claude's connectors. Nothing is held for approval on this path — that is the
+Local work is pi's; SaaS look-ups and actions are Claude's connectors, and so is the web — pi has no search or fetch tool of its
+own, so Claude's `WebSearch`/`WebFetch` stay enabled (`PI_CLAUDE_WEB=0` for an offline agent). Nothing is held for approval on this path — that is the
 point of pi-cli. Want approvals and read-only connectors instead? Use the parent folder ([`../`](..)), which is the Hermes setup.
 
 ---

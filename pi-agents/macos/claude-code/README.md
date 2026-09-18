@@ -8,7 +8,7 @@ Claude as real functions, and one warm `claude` process serves a whole conversat
 ```
  Hermes ──▶ pi_bridge.py :18485 ──▶ pi (tools + guardrails) ──/v1/chat/completions + tools──▶ Claude Code NATIVE bridge :18186
                                                                                                 │  one warm `claude -p --input-format stream-json`
-                                                                                                │  per conversation · built-in tools OFF
+                                                                                                │  per conversation · built-in tools OFF (web on)
                                                                                                 ├─ MCP shim: pi's tools = mcp__host__bash/read/write/…
                                                                                                 └─ claude.ai connectors ON (read-only allowlist)
 ```
@@ -169,6 +169,8 @@ cd ~/any/project && PI_UPSTREAM_BASE_URL=http://127.0.0.1:18186/v1 PI_UPSTREAM_P
   + query) plus one ~4 s pi turn when Claude Code parks the large result in a file and the model reads it back with `jq`. Pick **Low**
   or **Min** in Hermes for quick questions; `PI_BRIDGE_MODEL=claude-sonnet-5` is the other lever.
 - Token usage in replies is estimated (the Claude bridge reports usage only on non-streamed calls).
+- **WebSearch / WebFetch run inside Claude too** — pi ships no web tool, so these are the agent's only route to the internet and are left
+  enabled (and allowlisted, since this path runs `--permission-mode default`). `PI_CLAUDE_WEB=0` removes them for an offline agent.
 - Connector calls (Jira, Confluence, …) run **inside Claude**, natively, and are limited to the read-only allowlist in `run-bridge.sh`;
   local execution (bash, files) is always pi's, under the guardrails. `PI_CLAUDE_CONNECTORS=0` switches to strict pure-LLM mode.
 

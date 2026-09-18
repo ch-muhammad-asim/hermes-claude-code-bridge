@@ -66,7 +66,10 @@ MODEL_CONTEXT_WINDOWS = {
 # Conservative fallback for an id we don't know: better to compact early than to
 # overrun the window and have the CLI reject the request.
 DEFAULT_CONTEXT_WINDOW = 200_000
-DEFAULT_BUILTINS = ("Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,WebFetch,WebSearch,Task,TodoWrite,TodoRead,"
+# WebSearch/WebFetch are deliberately NOT in here: pi has no web tool of its own, so denying
+# Claude's would leave the agent with no way to reach the internet at all. They stay on for the
+# same reason connectors do — the work happens inside Claude, not on the host.
+DEFAULT_BUILTINS = ("Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,Task,TodoWrite,TodoRead,"
                     "AskUserQuestion,Skill,SlashCommand,KillShell,BashOutput,EnterPlanMode,ExitPlanMode,PowerShell,"
                     "CronCreate,CronDelete,CronList,Monitor,RemoteTrigger,SendMessage,ListAgents,TaskOutput,TaskStop,"
                     "EnterWorktree,ExitWorktree,PushNotification")

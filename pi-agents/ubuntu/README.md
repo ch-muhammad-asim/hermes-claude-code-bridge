@@ -6,7 +6,7 @@ so the endpoints are listening again after a reboot without anyone logging in.
 
 | Folder | Model backend | Endpoint (Hermes) | Upstream | systemd units (`--user`) |
 |--------|---------------|-------------------|----------|--------------------------|
-| [`claude-code/`](claude-code) | **Claude Code CLI, native tool calling** (MCP shim, one warm `claude` per conversation), built-ins off + read-only claude.ai connectors on | `http://127.0.0.1:18485/v1` | `:18186` | `pi-bridge-claude-code`, `pi-upstream-claude-code` |
+| [`claude-code/`](claude-code) | **Claude Code CLI, native tool calling** (MCP shim, one warm `claude` per conversation), built-ins off (WebSearch/WebFetch stay on — pi has none; `PI_CLAUDE_WEB=0` disables) + read-only claude.ai connectors on | `http://127.0.0.1:18485/v1` | `:18186` | `pi-bridge-claude-code`, `pi-upstream-claude-code` |
 | [`opencode/`](opencode) | OpenCode **free** models via the pure-LLM OpenCode Bridge | `http://127.0.0.1:18484/v1` | `:18385` | `pi-bridge-opencode`, `pi-upstream-opencode` |
 | [`claude-code/pi-cli/`](claude-code/pi-cli) | Terminal-native `pi` on Claude Code — pi's own tools as real function calls, **all** claude.ai connectors, no guardrails | — (terminal) | `:18187` | `pi-cli-claude-code` |
 | [`common/`](common) | Ubuntu launcher + apt-aware installer; the OS-agnostic code is symlinked to `../macos/common/` | | | |

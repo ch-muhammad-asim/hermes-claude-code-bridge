@@ -28,7 +28,7 @@ LABEL="com.hermes.claude-code-pi-cli"
 LOG_FILE="${PI_CLI_LOG:-$HOME/.pi-cli-claude-code.log}"
 SERVICE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/pi-cli-claude-code"
 # Claude's local tools are pi's job; everything else Claude has (every claude.ai connector) stays on.
-CLAUDE_BUILTINS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,WebFetch,WebSearch,Task,TodoWrite,TodoRead,AskUserQuestion,Skill,SlashCommand,KillShell,BashOutput,EnterPlanMode,ExitPlanMode,PowerShell,CronCreate,CronDelete,CronList,Monitor,RemoteTrigger,SendMessage,ListAgents,TaskOutput,TaskStop,EnterWorktree,ExitWorktree,PushNotification"
+CLAUDE_BUILTINS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Glob,Grep,LS,Task,TodoWrite,TodoRead,AskUserQuestion,Skill,SlashCommand,KillShell,BashOutput,EnterPlanMode,ExitPlanMode,PowerShell,CronCreate,CronDelete,CronList,Monitor,RemoteTrigger,SendMessage,ListAgents,TaskOutput,TaskStop,EnterWorktree,ExitWorktree,PushNotification"
 PI_BIN="${PI_BIN:-$(command -v pi || echo "$HOME/.local/bin/pi")}"
 
 shell_quote() { local q; printf -v q '%q' "$1"; printf '%s' "$q"; }
@@ -39,6 +39,12 @@ require() {
   [ -f "$NATIVE_BRIDGE" ] || { echo "[pi-cli] error: $NATIVE_BRIDGE missing" >&2; exit 1; }
 }
 
+# Claude's WebSearch/WebFetch stay ON — pi has no web tool of its own, so denying them would
+# leave the agent with no internet access at all. Set PI_CLAUDE_WEB=0 for an offline agent.
+claude_deny() {
+  if [ "${PI_CLAUDE_WEB:-1}" = "0" ]; then printf '%s,%s' "$CLAUDE_BUILTINS" "WebSearch,WebFetch"; else printf '%s' "$CLAUDE_BUILTINS"; fi
+}
+
 cmd_upstream() {
   require
   # Started from inside a Claude Code / Agent SDK session? Those variables make the spawned `claude`
@@ -47,7 +53,7 @@ cmd_upstream() {
   echo "[pi-cli] Claude Code NATIVE bridge on :${UPSTREAM_PORT} — pi tools as real functions, built-ins off, all connectors on"
   BRIDGE_PORT="$UPSTREAM_PORT" CLAUDE_CODE_BRIDGE_MODEL="$MODEL" CLAUDE_CODE_BRIDGE_MODELS="$MODELS" \
   CLAUDE_CODE_EFFORT="${CLAUDE_CODE_EFFORT:-medium}" CLAUDE_CODE_ALLOWED_TOOLS="*" \
-  CLAUDE_CODE_DISALLOWED_TOOLS="$CLAUDE_BUILTINS" CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
+  CLAUDE_CODE_DISALLOWED_TOOLS="$(claude_deny)" CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
     exec python3 "$HERE/../native/claude_native_bridge.py"
 }
 
