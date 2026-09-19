@@ -15,7 +15,7 @@
     "skill": "allow",
     "webfetch": "allow",
     "websearch": "allow",
-    "external_directory": "deny",
+    "external_directory": "allow",
     "doom_loop": "deny"
   },
   "autoupdate": false,
