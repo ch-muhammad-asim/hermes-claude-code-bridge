@@ -9,6 +9,7 @@ so the endpoints are listening again after a reboot without anyone logging in.
 | [`claude-code/`](claude-code) | **Claude Code CLI, native tool calling** (MCP shim, one warm `claude` per conversation), built-ins off (WebSearch/WebFetch stay on — pi has none; `PI_CLAUDE_WEB=0` disables) + read-only claude.ai connectors on | `http://127.0.0.1:18485/v1` | `:18186` | `pi-bridge-claude-code`, `pi-upstream-claude-code` |
 | [`opencode/`](opencode) | OpenCode **free** models via the pure-LLM OpenCode Bridge | `http://127.0.0.1:18484/v1` | `:18385` | `pi-bridge-opencode`, `pi-upstream-opencode` |
 | [`claude-code/pi-cli/`](claude-code/pi-cli) | Terminal-native `pi` on Claude Code — pi's own tools as real function calls, **all** claude.ai connectors, no guardrails | — (terminal) | `:18187` | `pi-cli-claude-code` |
+| [`codex/`](codex) | Terminal-native `pi` on the **OpenAI Codex CLI** — pure-LLM `codex exec`, pi keeps the tool loop, and codex's own apps/MCP connectors come through | — (terminal) | `:18288` | `pi-cli-codex` |
 | [`common/`](common) | Ubuntu launcher + apt-aware installer; the OS-agnostic code is symlinked to `../macos/common/` | | | |
 
 Ports match `../macos/`, so a Hermes endpoint configured against either tree needs no change.
@@ -26,6 +27,7 @@ mainly useful for debugging — calling them directly bypasses pi, its tools and
 | **18484** | pi bridge — opencode | `pi-bridge-opencode` | 👉 **Hermes endpoint.** pi + tools + approvals |
 | 18385 | pure-LLM OpenCode bridge | `pi-upstream-opencode` | model only, via `opencode run` |
 | 18187 | native Claude Code bridge — **terminal `pi`** | `pi-cli-claude-code` | what a bare `pi` talks to ([pi-cli](claude-code/pi-cli)); all connectors, no guardrails |
+| 18288 | pure-LLM Codex CLI bridge — **terminal `pi`** | `pi-cli-codex` | `pi --provider codex-cli` ([codex](codex)); codex apps/MCP on, read-only sandbox |
 
 ### Routes
 
