@@ -162,15 +162,30 @@ installer's output.
 
 ## Troubleshooting
 
-### `./run.sh test` shows the model *describing* a command instead of calling it
+### The model *describes* a command (```sh fence) instead of calling it — FIXED
 
-Known pi 0.86.0 behaviour, **not specific to this backend**. In headless `-p` mode pi hands a
-`streamSimple` provider a bare user message: `context.systemPrompt` and `context.tools` are both
-empty, so `text-tools-provider` has no tool schemas to inject and the model has no `<tool_call>`
-protocol to follow. Proven by pointing the *opencode-cli* provider at this bridge with
-`CODEX_BRIDGE_DUMP=/tmp/cxd` — it sends exactly the same tools-less request.
+Symptom: you ask pi to list a directory and the reply is a fenced `pwd && ls -la` suggestion; no
+tool ever runs. **Not specific to this backend** — it hit every text-emulated provider,
+`opencode-cli` included.
 
-The bridge itself is fine. Verify the emulation directly instead:
+Cause: pi 0.86 changed the provider contract. Up to 0.85 a request carried `systemPrompt` and
+`tools` as fields on `Context`; from 0.86 `normalizeContext()` folds both into the transcript's
+**system messages** (`sections`, `toolsAdded`, `toolsRemoved`) and the provider receives a
+`TranscriptContext` holding only `messages`. `text-tools-provider` still read `context.tools`,
+got `undefined`, and injected no tool protocol — so the model was never told the format existed.
+
+Fixed by `resolveContext()` in `../common/extensions/text-tools-provider/index.ts`, which reads
+both shapes. **Extensions load at pi startup, so restart pi after pulling this.**
+
+Confirming it works: watch the prompt size grow across turns in `./run.sh logs`. A working tool
+loop looks like `chars=1677 → 3527 → 8003` — pi calls the tool, feeds the result back, the model
+continues. A stuck one repeats the same size every turn.
+
+Diagnosing a recurrence — `CODEX_BRIDGE_DUMP=<prefix>` writes one `<prefix>.N.json` per turn, the
+exact request the client sent. If `tools` is absent there, the extension is at fault, not the
+bridge. Leave it unset in normal use.
+
+To check the model's side of the protocol independently of pi:
 
 ```bash
 curl -s localhost:18288/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -188,10 +203,8 @@ Expected — and confirmed on codex-cli 0.155.1 / gpt-5.6-sol:
 </tool_call>
 ```
 
-Use the interactive TUI (`./run.sh pi`) for real work; that path does populate tools.
-
-`CODEX_BRIDGE_DUMP=<prefix>` writes one `<prefix>.N.json` per turn — the exact request the client
-sent. That is how the above was diagnosed; leave it unset in normal use.
+Each turn is a full `codex exec` process, so this backend is markedly slower than `claude-code` —
+expect tens of seconds per tool call, not the sub-second round trip of a native bridge.
 
 ### Other symptoms
 
