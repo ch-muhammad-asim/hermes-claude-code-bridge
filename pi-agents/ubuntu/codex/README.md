@@ -136,6 +136,7 @@ Everything is env or `.env` next to `run.sh` — see [`.env.example`](.env.examp
 | `CODEX_BRIDGE_CWD` | `…/pi-cli-codex/sandbox-root` | keep it an empty directory |
 | `CODEX_BRIDGE_SANDBOX` | `read-only` | keep it |
 | `CODEX_BRIDGE_TIMEOUT` | `600` | seconds per turn, then 504 |
+| `CODEX_BIN` | first `codex` on `PATH` | pin it when more than one codex is installed — see below |
 
 `UPSTREAM_PORT` and `PI_CODEX_CLI_UPSTREAM` are **two different things** and must agree. Changing
 only the first produces no error: the bridge moves, the health check passes, and pi keeps talking
@@ -173,6 +174,28 @@ protocol to follow. Use the interactive TUI (`./run.sh pi`) to judge tool callin
 
 `CODEX_BRIDGE_DUMP=<prefix>` writes one `<prefix>.N.json` per turn — the exact request the client
 sent. Leave it unset in normal use.
+
+### Every turn 502s with `unexpected argument '--dangerously-bypass-hook-trust'`
+
+The service is running an older `codex` than your shell is. The generated runner starts its `PATH`
+with the directory holding `python3` — `/usr/bin` on most distros — so a leftover `/usr/bin/codex`
+from an earlier install wins over the npm-global one, and any build predating the flag rejects it.
+The bridge is healthy throughout, which is what makes this look like a bridge bug.
+
+Ask the bridge which binary it actually resolved — the only answer that counts:
+
+```bash
+curl -fsS http://127.0.0.1:18288/config | python3 -m json.tool | grep codex_bin
+```
+
+Compare against `command -v codex` and `codex --version`. If they disagree, pin it in `.env` and
+re-run `./run.sh install-service`:
+
+```
+CODEX_BIN=/home/you/.npm-global/bin/codex
+```
+
+Removing the stale installs fixes it permanently; the pin is the safe fix when you cannot.
 
 ### Other symptoms
 

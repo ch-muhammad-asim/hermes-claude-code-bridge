@@ -135,11 +135,50 @@ function partsOf(content: string | Array<{ type: string; text?: string; data?: s
   return out;
 }
 
+/**
+ * pi 0.86 changed what a provider receives. Until 0.85 the request carried `systemPrompt` and
+ * `tools` as fields on `Context`; from 0.86 `normalizeContext()` folds both into the transcript's
+ * SYSTEM messages (`content`, `sections`, `toolsAdded`, `toolsRemoved`) and the provider is handed
+ * a `TranscriptContext` that only has `messages`. Reading `context.tools` there yields undefined,
+ * so no tool protocol is injected and the model answers in prose ("no tool-call format was
+ * provided") while never calling anything. Resolve both shapes.
+ */
+type SystemLike = {
+  role: "system";
+  content: string | { text?: string }[];
+  sections?: Record<string, string | null>;
+  toolsAdded?: Tool[];
+  toolsRemoved?: { name: string }[];
+};
+
+function resolveContext(context: Context): { systemPrompt: string; tools: Tool[] } {
+  const parts: string[] = [];
+  const tools = new Map<string, Tool>();
+  // pre-0.86 shape first, so an older pi keeps working unchanged
+  if (context.systemPrompt) parts.push(context.systemPrompt);
+  for (const t of context.tools ?? []) tools.set(t.name, t);
+  // 0.86+: walk the transcript in order — later messages add and remove tools
+  for (const m of (context.messages ?? []) as Message[]) {
+    if ((m as { role?: string }).role !== "system") continue;
+    const sm = m as unknown as SystemLike;
+    const text = typeof sm.content === "string"
+      ? sm.content
+      : (sm.content ?? []).map((c) => c.text ?? "").filter(Boolean).join("\n");
+    if (text) parts.push(text);
+    for (const v of Object.values(sm.sections ?? {})) if (v) parts.push(v);
+    for (const t of sm.toolsAdded ?? []) tools.set(t.name, t);
+    for (const r of sm.toolsRemoved ?? []) tools.delete(r.name);
+  }
+  return { systemPrompt: parts.join("\n\n"), tools: [...tools.values()] };
+}
+
 function convertMessages(context: Context): OAIMessage[] {
   const out: OAIMessage[] = [];
-  const system = [context.systemPrompt || "", context.tools?.length ? toolProtocol(context.tools) : ""].filter(Boolean).join("\n\n");
+  const { systemPrompt, tools } = resolveContext(context);
+  const system = [systemPrompt, tools.length ? toolProtocol(tools) : ""].filter(Boolean).join("\n\n");
   if (system) out.push({ role: "system", content: system });
   for (const m of context.messages as Message[]) {
+    if ((m as { role?: string }).role === "system") continue; // already merged into `system` above
     if (m.role === "user") {
       out.push({ role: "user", content: partsOf(m.content as never) });
     } else if (m.role === "assistant") {
@@ -228,6 +267,7 @@ let callCounter = 0;
 
 function streamOpenCodeBridge(model: Model<never>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
+  const activeTools = resolveContext(context).tools;
   (async () => {
     const output: AssistantMessage = {
       role: "assistant", content: [], api: model.api, provider: model.provider, model: model.id,
@@ -313,7 +353,7 @@ function streamOpenCodeBridge(model: Model<never>, context: Context, options?: S
         }
         let parsedAny = false;
         for (const raw of blocks) {
-          const parsed = parseToolCall(raw, context.tools || []);
+          const parsed = parseToolCall(raw, activeTools);
           if (!parsed) continue;
           parsedAny = true;
           const id = `call_${Date.now().toString(36)}_${++callCounter}`;
