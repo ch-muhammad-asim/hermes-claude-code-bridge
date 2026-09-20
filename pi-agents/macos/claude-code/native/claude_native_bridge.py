@@ -251,6 +251,28 @@ class Session:
         self.shim_lock = threading.Lock()
         self._start(system_prompt)
 
+    def drain(self) -> int:
+        """Discard events left over from a turn the client abandoned mid-stream.
+
+        Without this the NEXT request on the session reads the tail of the dead turn — stale
+        content blocks, tool calls whose ids the client never saw — and the session appears to
+        hang forever. `_exit` is preserved: a dead child must still surface on the next turn.
+        """
+        dropped, exited = 0, None
+        while True:
+            try:
+                ev = self.events.get_nowait()
+            except queue.Empty:
+                break
+            if ev.get("type") == "_exit":
+                exited = ev
+            dropped += 1
+        if exited is not None:
+            self.events.put(exited)
+        self.pending.clear()
+        self.announced.clear()
+        return dropped
+
     # ── process ──
     def _start(self, system_prompt: str) -> None:
         srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -703,35 +725,45 @@ class Handler(BaseHTTPRequestHandler):
         last_sent = time.time()
         deadline = time.time() + self.reg.cfg.timeout
         finish, usage = "stop", {}
-        for ev in session.run_turn(deadline):
-            if "text" in ev:
-                text += ev["text"]
-                self.wfile.write(self._frame(model, {"content": ev["text"]}, cid=cid))
-            elif "tool_call" in ev:
-                tc = ev["tool_call"]
-                calls[tc["id"]] = {"name": tc["name"], "arguments": ""}
-                order.append(tc["id"])
-                self.wfile.write(self._frame(model, {"tool_calls": [{"index": tc["index"], "id": tc["id"], "type": "function",
-                                                                       "function": {"name": tc["name"], "arguments": ""}}]}, cid=cid))
-            elif "tool_args" in ev:
-                ta = ev["tool_args"]
-                calls[ta["id"]]["arguments"] += ta["delta"]
-                self.wfile.write(self._frame(model, {"tool_calls": [{"index": ta["index"], "function": {"arguments": ta["delta"]}}]}, cid=cid))
-            elif "done" in ev:
-                finish = "tool_calls" if ev["done"] == "tool_calls" else "stop"
-                usage = ev.get("usage") or {}
+        try:
+            for ev in session.run_turn(deadline):
+                if "text" in ev:
+                    text += ev["text"]
+                    self.wfile.write(self._frame(model, {"content": ev["text"]}, cid=cid))
+                elif "tool_call" in ev:
+                    tc = ev["tool_call"]
+                    calls[tc["id"]] = {"name": tc["name"], "arguments": ""}
+                    order.append(tc["id"])
+                    self.wfile.write(self._frame(model, {"tool_calls": [{"index": tc["index"], "id": tc["id"], "type": "function",
+                                                                        "function": {"name": tc["name"], "arguments": ""}}]}, cid=cid))
+                elif "tool_args" in ev:
+                    ta = ev["tool_args"]
+                    calls[ta["id"]]["arguments"] += ta["delta"]
+                    self.wfile.write(self._frame(model, {"tool_calls": [{"index": ta["index"], "function": {"arguments": ta["delta"]}}]}, cid=cid))
+                elif "done" in ev:
+                    finish = "tool_calls" if ev["done"] == "tool_calls" else "stop"
+                    usage = ev.get("usage") or {}
+                self.wfile.flush()
+                last_sent = time.time()
+            # Make sure every announced call has complete JSON arguments (pi needs valid JSON).
+            for call_id, c in calls.items():
+                info = session.pending.get(call_id)
+                if info and not c["arguments"].strip():
+                    c["arguments"] = json.dumps(info["arguments"])
+                    self.wfile.write(self._frame(model, {"tool_calls": [{"index": order.index(call_id), "function": {"arguments": c["arguments"]}}]}, cid=cid))
+            self.wfile.write(self._frame(model, {}, finish, usage, cid=cid))
+            self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
-            last_sent = time.time()
-        # Make sure every announced call has complete JSON arguments (pi needs valid JSON).
-        for call_id, c in calls.items():
-            info = session.pending.get(call_id)
-            if info and not c["arguments"].strip():
-                c["arguments"] = json.dumps(info["arguments"])
-                self.wfile.write(self._frame(model, {"tool_calls": [{"index": order.index(call_id), "function": {"arguments": c["arguments"]}}]}, cid=cid))
-        self.wfile.write(self._frame(model, {}, finish, usage, cid=cid))
-        self.wfile.write(b"data: [DONE]\n\n")
-        self.wfile.flush()
-        self._record_assistant(session, text, calls)
+            self._record_assistant(session, text, calls)
+        except (BrokenPipeError, ConnectionResetError):
+            # pi hung up mid-stream: an interrupt (escape), /clear, or a closed window. The turn is
+            # over for the client but NOT for us — Claude keeps producing events for it. Finish our
+            # side: record what we got, then drop the leftovers, or the next request on this session
+            # reads the tail of this dead turn and the session hangs forever ("stuck session").
+            dropped = session.drain()
+            self._record_assistant(session, text, calls)
+            print(f"[claude-native] session={session.id} client disconnected mid-stream — "
+                  f"turn recorded, {dropped} stale event(s) dropped", flush=True)
 
     def _blocking(self, session: Session, model: str) -> None:
         deadline = time.time() + self.reg.cfg.timeout
