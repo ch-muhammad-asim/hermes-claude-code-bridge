@@ -507,12 +507,32 @@ class Registry:
                         s.kill()
                         self.sessions.pop(sid, None)
 
-    def find_for_tool_results(self, results: list[dict[str, Any]]) -> Optional[Session]:
+    def find_for_tool_results(self, results: list[dict[str, Any]],
+                              norm: Optional[list[dict[str, Any]]] = None) -> Optional[Session]:
+        """The live session awaiting these tool_call_ids — unless the client compacted.
+
+        Matching on tool_call_id alone is not enough. When pi auto-compacts it replaces its whole
+        transcript with a short summary, but a tool call from before the compaction is still
+        pending here, so the result would be routed back into the warm `claude` process that still
+        holds the FULL pre-compaction context. Its reported prompt_tokens therefore never drops,
+        pi sees the window still full and compacts again — a loop that re-summarises ~1.1M tokens
+        every turn and spawns a fresh `claude` per attempt.
+
+        So: if the incoming history is shorter than what this session has already seen, the client
+        rewrote its transcript. Refuse the match and let the caller seed a new session from the
+        compacted history, which is the whole point of compacting.
+        """
         ids = {r.get("tool_call_id") for r in results}
         with self.lock:
             for s in self.sessions.values():
-                if not s.dead and ids & set(s.pending):
-                    return s
+                if s.dead or not (ids & set(s.pending)):
+                    continue
+                if norm is not None and len(norm) < len(s.history):
+                    print(f"[claude-native] session={s.id} client compacted "
+                          f"({len(s.history)} → {len(norm)} messages) — starting a fresh session",
+                          flush=True)
+                    continue
+                return s
         return None
 
     def find_for_continuation(self, norm: list[dict[str, Any]], model: str, sig: str) -> Optional[Session]:
@@ -646,7 +666,7 @@ class Handler(BaseHTTPRequestHandler):
         session: Optional[Session] = None
         mode = "new"
         if trailing_tools:
-            session = self.reg.find_for_tool_results(trailing_tools)
+            session = self.reg.find_for_tool_results(trailing_tools, norm)
             mode = "tool_results" if session else "new"
         else:
             session = self.reg.find_for_continuation(norm, model, sig)
