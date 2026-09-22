@@ -7,6 +7,12 @@ backend; only the model behind pi changes.
 
 ## 🏗️ Architecture
 
+<p align="center">
+  <img src="assets/pi-agents-architecture.png" alt="pi-agents real request, tool, and approval flow" width="100%">
+</p>
+
+> **Real traffic flow:** Hermes → `pi_bridge.py` → headless pi agent → model provider → guardrails → local pi tools → tool-result loop → SSE response.
+
 ```mermaid
 flowchart LR
     U([👤 You]) --> H[🖥️ Hermes desktop<br/>Custom endpoint]
