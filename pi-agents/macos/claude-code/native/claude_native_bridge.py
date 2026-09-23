@@ -50,13 +50,14 @@ BRIDGE_VERSION = "1.0.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHIM = os.path.join(HERE, "mcp_shim.py")
 DEFAULT_MODEL = "claude-opus-5"
-DEFAULT_MODELS = ["claude-opus-5", "claude-fable-5-1", "claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
+DEFAULT_MODELS = ["claude-opus-5", "claude-opus-5-5", "claude-fable-5-1", "claude-fable-5", "claude-opus-4-8", "claude-sonnet-5",
                   "claude-sonnet-4-6", "claude-haiku-4-5"]
 # Context windows advertised on /v1/models. Without them an OpenAI-compatible client
 # has no way to size its context budget and falls back to its own default — pi assumes
 # 200k, so on a 1M model it auto-compacts at a fifth of the usable window.
 MODEL_CONTEXT_WINDOWS = {
     "claude-opus-5": 1_000_000,
+    "claude-opus-5-5": 1_000_000,  # needs Claude Code >= 2.1.280, else the CLI 400s
     "claude-fable-5-1": 1_000_000,
     "claude-fable-5": 1_000_000,
     "claude-opus-4-8": 1_000_000,

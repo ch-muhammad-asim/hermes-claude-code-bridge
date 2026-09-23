@@ -80,13 +80,13 @@ upstream_run() {
     # claude process per conversation; connectors read-only (allowlist) unless CLAUDE_CODE_MCP_ALLOW='*'.
     BRIDGE_PORT="$UPSTREAM_PORT" CLAUDE_CODE_BRIDGE_MODEL="$MODEL" CLAUDE_CODE_EFFORT="${CLAUDE_CODE_EFFORT:-medium}" \
     CLAUDE_CODE_ALLOWED_TOOLS="$(claude_allow)" CLAUDE_CODE_DISALLOWED_TOOLS="$(claude_deny)" \
-    CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
+    CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-opus-5-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
     CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
       exec python3 "$NATIVE_BRIDGE"
   fi
   if [ "${PI_CLAUDE_CONNECTORS:-1}" = "0" ]; then
     BRIDGE_PORT="$UPSTREAM_PORT" CLAUDE_CODE_TOOLS="none" CLAUDE_CODE_BRIDGE_MODEL="$MODEL" CLAUDE_CODE_EFFORT="${CLAUDE_CODE_EFFORT:-medium}" \
-    CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
+    CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-opus-5-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
     CLAUDE_CODE_BRIDGE_LABEL="$UPSTREAM_LABEL" CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
       exec "$CLAUDE_LAUNCHER" run
   fi
@@ -94,7 +94,7 @@ upstream_run() {
   CLAUDE_CODE_PERMISSION_MODE="default" \
   CLAUDE_CODE_DISALLOWED_TOOLS="$(claude_deny)" \
   CLAUDE_CODE_ALLOWED_TOOLS="$(claude_allow)" \
-  CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
+  CLAUDE_CODE_BRIDGE_MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-opus-5-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}" \
   CLAUDE_CODE_BRIDGE_LABEL="$UPSTREAM_LABEL" CLAUDE_CODE_BRIDGE_TIMEOUT="${CLAUDE_CODE_BRIDGE_TIMEOUT:-600}" \
     exec "$CLAUDE_LAUNCHER" run
 }

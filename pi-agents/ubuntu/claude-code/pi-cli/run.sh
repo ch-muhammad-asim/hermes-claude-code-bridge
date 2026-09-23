@@ -27,7 +27,7 @@ HERE="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 NATIVE_BRIDGE="$HERE/../native/claude_native_bridge.py"
 UPSTREAM_PORT="${UPSTREAM_PORT:-18187}"
 MODEL="${PI_CLI_MODEL:-claude-opus-5}"
-MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}"
+MODELS="${CLAUDE_CODE_BRIDGE_MODELS:-claude-opus-5,claude-opus-5-5,claude-fable-5-1,claude-fable-5,claude-opus-4-8,claude-sonnet-5,claude-sonnet-4-6,claude-haiku-4-5}"
 # Plain systemd unit stem (the reverse-DNS label in macos/ is a launchd convention).
 LABEL="pi-cli-claude-code"
 LOG_FILE="${PI_CLI_LOG:-$HOME/.pi-cli-claude-code.log}"
